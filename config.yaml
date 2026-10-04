@@ -1,0 +1,128 @@
+# =============================================================================
+# 研析通 (YanXiTong) v2.0 — central runtime configuration
+# Secrets (API keys / passwords) are injected via environment variables,
+# never stored in this file. See docker-compose.yml for wiring.
+# =============================================================================
+
+app:
+  name: yanxitong
+  version: "2.0.0"
+  env: dev                      # dev | staging | prod
+  host: 0.0.0.0
+  port: 8001
+  log_level: info
+
+# --- LLM: model routing table --------------------------------------------------
+llm:
+  provider: dashscope            # OpenAI-compatible endpoint of Alibaba Cloud
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  api_key_env: sk-ws-H.PDDPXXP.nl0l.MEUCIQDcjU5sejGwQ0f_RbF1fpPf8bvDXgxoUP3kMHJ8ywFX3wIgLNt6Ft8AMJ_j3La2JLyXJAg2y_bvFENTULSV5qjd4AI
+  default:
+    temperature: 0.3
+    max_tokens: 4096
+    timeout_seconds: 120
+    max_retries: 2
+  routing:
+    supervisor:                  # task decomposition / orchestration
+      model: qwen-max
+      temperature: 0.2
+      max_tokens: 4096
+    lightweight:                 # classification, extraction, reranking glue
+      model: qwen3.8-flash
+      temperature: 0.1
+      max_tokens: 1024
+    deep_reasoning:              # experiment design, statistical reasoning
+      model: deepseek-v4-pro
+      temperature: 0.5
+      max_tokens: 8192
+
+# --- Retrieval (hybrid RAG) -----------------------------------------------------
+retriever:
+  # 本地已下载的 BGE-M3 模型目录（对应 RetrieverConfig.embedding_model 字段）
+  embedding_model: d:/aafpc/yanxitong/models/models/BAAI--bge-m3/snapshots/master
+  sources:
+    arxiv:
+      max_results: 20
+      timeout_seconds: 15
+    semantic_scholar:
+      max_results: 20
+      timeout_seconds: 15
+  embedding:
+    model: BAAI/bge-m3           # BGE-M3
+    dim: 1024
+    normalize: true
+    batch_size: 32
+  vector_store:
+    backend: faiss
+    index_path: data/faiss
+    top_k: 8
+  hybrid:
+    vector_weight: 0.7
+    bm25_weight: 0.3
+    rerank_top_k: 5
+
+# --- Knowledge graph construction -------------------------------------------------
+kg_builder:
+  entity_types:
+    - ResearchProblem
+    - Method
+    - Dataset
+    - Model
+    - Metric
+    - Finding
+    - Author
+    - Venue
+  relation_types:
+    - USES_DATASET
+    - USES_METRIC
+    - BASED_ON
+    - PROPOSES
+    - EVALUATED_ON
+    - OUTPERFORMS
+    - APPLIED_TO
+    - CITES
+    - EXTENDS
+    - CONTRADICTS
+  max_entities_per_doc: 60
+  batch_size: 16
+  dedup_similarity: 0.95
+
+# --- Sandboxed code execution (data analyst agent) ---------------------------------
+sandbox:
+  image: yanxitong-sandbox:2.0
+  memory_limit: 512m
+  cpu_limit: 1.0
+  timeout_seconds: 30
+  network: disabled
+  workspace_mount: /workspace
+  max_output_bytes: 262144       # 256 KB stdout cap
+
+# --- Answer safety / quality gates --------------------------------------------------
+safety:
+  confidence_threshold: 0.6
+  self_consistency_samples: 3
+  require_citations: true
+  refuse_below_threshold: true
+
+# --- Semantic answer cache ------------------------------------------------------------
+cache:
+  backend: redis
+  ttl_seconds: 3600
+  similarity_threshold: 0.92
+  namespace: "yxt:cache:"
+
+# --- API rate limiting ------------------------------------------------------------------
+rate_limit:
+  requests_per_minute: 60
+  burst: 10
+  key_prefix: "yxt:ratelimit:"
+
+# --- Observability ------------------------------------------------------------------------
+observability:
+  tracing:
+    enabled: true
+    otlp_endpoint_env: OTEL_EXPORTER_OTLP_ENDPOINT   # -> Jaeger (4317)
+    service_name: yanxitong
+  metrics:
+    enabled: true
+    path: /metrics

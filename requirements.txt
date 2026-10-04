@@ -1,0 +1,54 @@
+# =============================================================================
+# 研析通 v2.0 — pinned runtime + dev dependencies (Python 3.12)
+# Install:  pip install -r requirements.txt
+# =============================================================================
+
+# --- Agent orchestration & LLM chains ---------------------------------------
+langgraph==0.6.11
+langchain==0.3.26
+langchain-openai==0.3.23
+langchain-community==0.3.27
+
+# --- Web service -------------------------------------------------------------
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+python-multipart==0.0.20
+
+# --- Data models / settings / config -----------------------------------------
+pydantic==2.11.7
+pydantic-settings==2.10.1
+PyYAML==6.0.2
+
+# --- Knowledge graph & cache --------------------------------------------------
+neo4j==5.28.1
+redis==6.2.0
+
+# --- Vector retrieval & embeddings -------------------------------------------
+faiss-cpu==1.11.0.post1
+sentence-transformers==3.4.1
+
+# --- Document processing ------------------------------------------------------
+PyMuPDF==1.26.1
+
+# --- HTTP clients -------------------------------------------------------------
+httpx==0.28.1
+aiohttp==3.12.15
+aiofiles==24.1.0
+
+# --- LLM provider SDKs ---------------------------------------------------------
+openai==1.99.3
+dashscope==1.24.0
+
+# --- Observability -------------------------------------------------------------
+opentelemetry-api==1.36.0
+opentelemetry-sdk==1.36.0
+opentelemetry-exporter-otlp-proto-grpc==1.36.0
+opentelemetry-instrumentation-fastapi==0.57b0
+prometheus-client==0.22.1
+
+# --- Testing & linting ----------------------------------------------------------
+pytest==8.4.1
+pytest-asyncio==1.1.0
+pytest-cov==6.2.1
+black==25.1.0
+ruff==0.12.5

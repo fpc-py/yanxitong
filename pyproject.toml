@@ -1,0 +1,127 @@
+# =============================================================================
+# 研析通 (YanXiTong) v2.0 — Academic Research Multi-Agent System
+# Python 3.12 project definition
+# =============================================================================
+
+[build-system]
+requires = ["setuptools>=69.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yanxitong"
+version = "2.0.0"
+description = "研析通 v2.0 — LangGraph-based multi-agent academic research system with hybrid RAG, Neo4j knowledge graph, sandboxed data analysis, and full observability."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+    { name = "YanXiTong Team", email = "team@yanxitong.example" },
+]
+keywords = [
+    "multi-agent", "langgraph", "rag", "knowledge-graph", "neo4j",
+    "academic-research", "llm", "agents",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: FastAPI",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Private :: Do Not Upload",
+]
+
+# --- Core runtime dependencies (pinned in requirements.txt) ------------------
+dependencies = [
+    # Agent orchestration & LLM chains
+    "langgraph",
+    "langchain",
+    "langchain-openai",
+    "langchain-community",
+    # Web service
+    "fastapi",
+    "uvicorn",
+    "python-multipart",
+    # Data models / settings
+    "pydantic",
+    "pydantic-settings",
+    "pyyaml",
+    # Knowledge graph & cache
+    "neo4j",
+    "redis",
+    # Vector retrieval & embeddings
+    "faiss-cpu",
+    "sentence-transformers",
+    # Document processing
+    "pymupdf",
+    # HTTP clients
+    "httpx",
+    "aiohttp",
+    "aiofiles",
+    # LLM provider SDKs
+    "openai",
+    "dashscope",
+    # Observability
+    "opentelemetry-api",
+    "opentelemetry-sdk",
+    "opentelemetry-instrumentation-fastapi",
+    "prometheus-client",
+    # Testing (also needed for in-repo test discovery)
+    "pytest",
+    "pytest-asyncio",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "black",
+    "ruff",
+]
+
+[project.urls]
+Homepage = "https://example.com/yanxitong"
+Repository = "https://example.com/yanxitong/yanxitong"
+
+# --- Packaging ---------------------------------------------------------------
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["agents*", "api*", "core*", "knowledge*", "observability*", "safety*", "tools*", "workflows*"]
+
+# --- Tool configuration ------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra --strict-markers --cov=src --cov-report=term-missing"
+markers = [
+    "unit: fast isolated tests",
+    "integration: tests requiring docker-compose services",
+    "evaluation: LLM quality / regression benchmarks (slow)",
+    "slow: skipped by default in CI quick runs",
+]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["*/tests/*", "*/__init__.py"]
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "ASYNC", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agents", "api", "core", "knowledge", "observability", "safety", "tools", "workflows"]

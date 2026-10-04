@@ -1,0 +1,109 @@
+"""FAISS vector store with BGE-M3 embeddings for paper retrieval."""
+
+import json
+import os
+import threading
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import faiss
+from sentence_transformers import SentenceTransformer
+
+from src.core.config import get_settings
+
+
+class VectorStore:
+    """FAISS-backed vector store using BGE-M3 embeddings."""
+
+    def __init__(self, dim: Optional[int] = None, index_path: Optional[str] = None):
+        settings = get_settings()
+        self.dim = dim or settings.retriever.vector_dim
+        self.model = SentenceTransformer(settings.retriever.embedding_model)
+        self._lock = threading.Lock()
+        self._documents: dict[int, dict] = {}  # faiss_id -> doc
+        self._next_id = 0
+
+        if index_path and os.path.exists(index_path):
+            self.load(index_path)
+        else:
+            self.index = faiss.IndexFlatIP(self.dim)  # inner product for cosine on normalized vectors
+
+    def _embed(self, texts: list[str]) -> np.ndarray:
+        """Convert texts to normalized embedding vectors."""
+        embeddings = self.model.encode(
+            texts, normalize_embeddings=True, show_progress_bar=False
+        )
+        return np.array(embeddings).astype(np.float32)
+
+    def add_documents(self, docs: list[dict]) -> list[int]:
+        """Add documents to the index. Each doc needs 'text' field for embedding.
+        Returns list of internal IDs."""
+        if not docs:
+            return []
+        texts = [doc.get("text", doc.get("abstract", doc.get("title", ""))) for doc in docs]
+        embeddings = self._embed(texts)
+        ids = []
+        with self._lock:
+            start_id = self._next_id
+            self.index.add(embeddings)
+            for i, doc in enumerate(docs):
+                doc_id = start_id + i
+                self._documents[doc_id] = {**doc, "_faiss_id": doc_id}
+                ids.append(doc_id)
+            self._next_id = start_id + len(docs)
+        return ids
+
+    def search(self, query: str, top_k: int = 10) -> list[dict]:
+        """Search for documents similar to query. Returns docs with scores."""
+        if self.index.ntotal == 0:
+            return []
+        query_embedding = self._embed([query])
+        k = min(top_k, self.index.ntotal)
+        with self._lock:
+            scores, indices = self.index.search(query_embedding, k)
+        results = []
+        for score, idx in zip(scores[0], indices[0]):
+            if idx >= 0 and idx in self._documents:
+                doc = dict(self._documents[idx])
+                doc["similarity"] = float(score)
+                results.append(doc)
+        return results
+
+    def save(self, path: str):
+        """Persist index and documents to disk."""
+        Path(path).mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            faiss.write_index(self.index, os.path.join(path, "index.faiss"))
+            with open(os.path.join(path, "docs.json"), "w", encoding="utf-8") as f:
+                json.dump({"_next_id": self._next_id, "documents": self._documents}, f, ensure_ascii=False, default=str)
+
+    def load(self, path: str):
+        """Load index and documents from disk."""
+        with self._lock:
+            self.index = faiss.read_index(os.path.join(path, "index.faiss"))
+            with open(os.path.join(path, "docs.json"), "r", encoding="utf-8") as f:
+                data = json.load(f)
+                self._next_id = data["_next_id"]
+                self._documents = {int(k): v for k, v in data["documents"].items()}
+
+    def __len__(self) -> int:
+        return self.index.ntotal
+
+    def clear(self):
+        """Reset the index."""
+        with self._lock:
+            self.index = faiss.IndexFlatIP(self.dim)
+            self._documents.clear()
+            self._next_id = 0
+
+
+# Global singleton
+_vector_store: Optional[VectorStore] = None
+
+
+def get_vector_store() -> VectorStore:
+    global _vector_store
+    if _vector_store is None:
+        _vector_store = VectorStore()
+    return _vector_store

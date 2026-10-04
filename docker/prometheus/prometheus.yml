@@ -1,0 +1,14 @@
+# Prometheus scrape configuration for 研析通 v2.0
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "yanxitong-app"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["app:8000"]
+
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]

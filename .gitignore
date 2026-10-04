@@ -1,0 +1,65 @@
+# ============================================================
+# 研析通 v2.0 — Git 忽略规则
+# ============================================================
+
+# --- 密钥与本地配置（绝对不要上传）----------------------------
+.env
+.env.*
+!.env.example
+
+# --- 内部方案文档（不上传）------------------------------------
+研析通v2.0_完整方案.md
+
+# --- 模型权重（约 2.3GB，可重新下载，不上传）-------------------
+# 重新下载：
+#   $env:HF_ENDPOINT = "https://hf-mirror.com"
+#   .\.venv\Scripts\huggingface-cli.exe download BAAI/bge-m3 --local-dir models/bge-m3
+# 并按 config.yaml -> retriever.embedding_model 指向的目录放置
+models/
+
+# --- Python ---------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+ENV/
+
+# --- 测试与静态检查缓存 ----------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# --- 前端 -----------------------------------------------------
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.local
+
+# --- 日志与运行时产物 ------------------------------------------
+*.log
+logs/
+*.pid
+*.tmp
+
+# --- IDE / 编辑器 ---------------------------------------------
+.idea/
+.vscode/
+*.iml
+*.swp
+*~
+
+# --- 操作系统 -------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
