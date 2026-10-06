@@ -52,26 +52,26 @@ def get_kb_store() -> VectorStore:
     return _kb_store
 
 
-def add_file(filename: str, content: str) -> int:
-    """分块入库并持久化，返回新增块数。"""
+def add_file(filename: str, content: str, owner: str = "") -> int:
+    """分块入库并持久化，返回新增块数；owner 为上传者身份标识（用户间隔离）。"""
     store = get_kb_store()
     now = datetime.now(timezone.utc).isoformat()
     chunks = _split_chunks(content)
     if not chunks:
         return 0
     store.add_documents(
-        [{"text": c, "kind": "knowledge", "filename": filename, "uploaded_at": now} for c in chunks]
+        [{"text": c, "kind": "knowledge", "filename": filename, "owner": owner, "uploaded_at": now} for c in chunks]
     )
     store.save(KB_DIR)
     return len(chunks)
 
 
-def list_files() -> list[dict]:
-    """按文件名聚合知识库文档：块数 / 总字符 / 最新时间 / 首块预览。"""
+def list_files(owner: str = "") -> list[dict]:
+    """按文件名聚合「该 owner」的知识库文档：块数 / 总字符 / 最新时间 / 首块预览。"""
     store = get_kb_store()
     grouped: dict[str, dict] = {}
     for doc in store._documents.values():
-        if doc.get("kind") != "knowledge":
+        if doc.get("kind") != "knowledge" or doc.get("owner", "") != owner:
             continue
         fn = doc.get("filename", "")
         g = grouped.setdefault(fn, {"filename": fn, "chunks": 0, "chars": 0, "updated_at": "", "preview": ""})
@@ -85,10 +85,15 @@ def list_files() -> list[dict]:
     return list(grouped.values())
 
 
-def remove_file(filename: str) -> int:
-    """删除该文件全部块（重建索引保留其余块），返回删除块数；无匹配返回 0。"""
+def remove_file(filename: str, owner: str = "") -> int:
+    """删除该 owner 名下文件的全部块（重建索引保留其余块），返回删除块数；无匹配返回 0。"""
     store = get_kb_store()
-    remaining = [d for d in store._documents.values() if d.get("kind") != "knowledge" or d.get("filename") != filename]
+    remaining = [
+        d for d in store._documents.values()
+        if d.get("kind") != "knowledge"
+        or d.get("owner", "") != owner
+        or d.get("filename") != filename
+    ]
     removed = len(store._documents) - len(remaining)
     if removed == 0:
         return 0

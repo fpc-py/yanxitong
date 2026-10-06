@@ -47,6 +47,11 @@ logs/
 *.pid
 *.tmp
 
+# --- 运行时数据（会话库 / 论文向量索引 / 上传文件）--------------
+data/sessions.db
+data/faiss/
+data/uploads/
+
 # --- IDE / 编辑器 ---------------------------------------------
 .idea/
 .vscode/

@@ -47,6 +47,28 @@ services:
     restart: unless-stopped
     networks: [yxt-net]
 
+  # --- Accounts / anonymous quota ---------------------------------------------
+  mysql:
+    image: mysql:8.0
+    container_name: yxt-mysql
+    ports:
+      - "3309:3306"   # 宿主 3309，避开本机已装的 MySQL 及其他项目占用的 3306/3307
+    environment:
+      MYSQL_ROOT_PASSWORD: yxt_root_pw
+      MYSQL_DATABASE: yanxitong
+      MYSQL_USER: yanxitong
+      MYSQL_PASSWORD: yanxitong
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uyanxitong", "-pyanxitong"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    networks: [yxt-net]
+
   # --- Application -------------------------------------------------------------
   app:
     build:
@@ -60,6 +82,11 @@ services:
       NEO4J_USER: neo4j
       NEO4J_PASSWORD: password
       REDIS_URL: redis://redis:6379/0
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: yanxitong
+      MYSQL_PASSWORD: yanxitong
+      MYSQL_DATABASE: yanxitong
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       YXT_CONFIG_PATH: /app/config.yaml
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
@@ -70,6 +97,8 @@ services:
       neo4j:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      mysql:
         condition: service_healthy
     restart: unless-stopped
     networks: [yxt-net]
@@ -126,6 +155,7 @@ volumes:
   neo4j-data:
   neo4j-logs:
   redis-data:
+  mysql-data:
   app-data:
   prometheus-data:
   grafana-data:

@@ -6,9 +6,12 @@ import TopStatusBar from '@/components/TopStatusBar.vue'
 import SideNav from '@/components/SideNav.vue'
 import InspectorPanel from '@/components/InspectorPanel.vue'
 import GlobalComposer from '@/components/GlobalComposer.vue'
+import AuthModal from '@/components/AuthModal.vue'
 import { useSessionStore } from '@/stores/session'
+import { useAuthStore } from '@/stores/auth'
 
 const store = useSessionStore()
+const auth = useAuthStore()
 const route = useRoute()
 const inspectorOpen = ref(false)
 const navCollapsed = ref(false)
@@ -16,6 +19,8 @@ let healthTimer: number | null = null
 
 onMounted(() => {
   void store.refreshHealth()
+  // 恢复身份：本地 token 有效则回到登录态，否则同步匿名配额（顶栏/侧栏展示）
+  void auth.refreshMe()
   // 从 localStorage 恢复了会话时，回填会话状态与引用链，
   // 避免刷新后各面板显示为空白（会话本身仍在后端）。
   if (store.sessionId) {
@@ -50,6 +55,9 @@ onUnmounted(() => {
     </main>
 
     <InspectorPanel v-model:open="inspectorOpen" />
+
+    <!-- 全局唯一的账号弹窗（左下角身份卡 / 配额提示唤起） -->
+    <AuthModal />
   </div>
 </template>
 

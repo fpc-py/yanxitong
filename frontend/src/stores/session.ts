@@ -2,7 +2,8 @@
 
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import api, { REQUEST_TIMEOUT, claimConfidence, claimText, extractErrorMessage, flattenCitations, isNotFound } from '@/api/client'
+import api, { REQUEST_TIMEOUT, claimConfidence, claimText, extractErrorMessage, flattenCitations, isNotFound, isQuotaExceeded } from '@/api/client'
+import { useAuthStore } from '@/stores/auth'
 import type { Citation, Claim, HealthResponse, SessionListItem, SessionStatus } from '@/api/types'
 
 /** 一条问答记录 */
@@ -104,6 +105,8 @@ export const useSessionStore = defineStore('session', () => {
   const loading = ref(false)
   const activeLabel = ref<string>('')
   const error = ref<string | null>(null)
+  /** 最近一次失败的原始错误对象（用于识别配额用尽等业务错误码） */
+  const lastError = ref<unknown>(null)
   const elapsedMs = ref(0)
   const lastLatencyMs = ref<number | null>(null)
   const latencyLog = ref<LatencyRecord[]>([])
@@ -139,6 +142,7 @@ export const useSessionStore = defineStore('session', () => {
    */
   async function runTask<T>(label: string, fn: () => Promise<T>): Promise<T | null> {
     error.value = null
+    lastError.value = null
     loading.value = true
     startTimer(label)
     const t0 = Date.now()
@@ -149,6 +153,7 @@ export const useSessionStore = defineStore('session', () => {
     } catch (e) {
       const ms = Date.now() - t0
       recordLatency(label, ms)
+      lastError.value = e
       error.value = extractErrorMessage(e)
       return null
     } finally {
@@ -229,9 +234,13 @@ export const useSessionStore = defineStore('session', () => {
     const ms = Date.now() - t0
 
     if (!res) {
+      const quotaHit = isQuotaExceeded(lastError.value)
+      if (quotaHit) void useAuthStore().refreshMe()
       pushMessage({
         role: 'assistant',
-        content: `⚠️ 本次请求未能完成。\n\n${error.value ?? '未知错误'}\n\n提示：后端计算耗时较长（常见几十秒），也可能是后端未启动（http://localhost:8001）。`,
+        content: quotaHit
+          ? `⚠️ ${error.value ?? '未登录免费体验次数已用完'}\n\n注册 / 登录后即可继续提问，研究数据也将永久保存到你的账号。`
+          : `⚠️ 本次请求未能完成。\n\n${error.value ?? '未知错误'}\n\n提示：后端计算耗时较长（常见几十秒），也可能是后端未启动（http://localhost:8001）。`,
         citations: [],
         confidence: 0,
         phase: '',
@@ -243,6 +252,7 @@ export const useSessionStore = defineStore('session', () => {
     }
 
     setSessionId(res.session_id)
+    void useAuthStore().syncQuota(res.quota_remaining) // 未登录时后端返回剩余次数
     void loadSessions() // 新建会话后刷新历史列表，保持最新
     if (topicInput) topic.value = topicInput
     pushMessage({

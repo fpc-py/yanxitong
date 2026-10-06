@@ -39,6 +39,44 @@ class QueryResponse(BaseModel):
         default_factory=list,
         description="沙箱生成的图表，元素形如 {name, data_url}",
     )
+    quota_remaining: Optional[int] = Field(
+        None,
+        description="未登录用户的剩余免费问答次数；已登录或配额服务不可用时为 null",
+    )
+
+
+# ---- Auth -------------------------------------------------------------------
+
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64)
+    password: str = Field(..., min_length=1, max_length=128)
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64)
+    password: str = Field(..., min_length=1, max_length=128)
+
+
+class UserInfo(BaseModel):
+    id: int
+    username: str
+    created_at: Optional[str] = None
+
+
+class QuotaInfo(BaseModel):
+    limit: int
+    used: int
+    remaining: int
+
+
+class AuthResponse(BaseModel):
+    token: str
+    user: UserInfo
+
+
+class MeResponse(BaseModel):
+    user: Optional[UserInfo] = None
+    quota: Optional[QuotaInfo] = None
 
 
 class BibliographyResponse(BaseModel):

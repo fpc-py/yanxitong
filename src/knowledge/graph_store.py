@@ -121,14 +121,25 @@ class GraphStore:
         )
         return [dict(r["e"]) for r in results]
 
-    async def search_entities_multi(self, keywords: list[str], limit: int = 200) -> list[dict]:
-        """批量按多个关键词检索实体（一次往返，替代逐个关键词循环查询）。"""
+    async def search_entities_multi(
+        self, keywords: list[str], limit: int = 200, scope: Optional[str] = None
+    ) -> list[dict]:
+        """批量按多个关键词检索实体（一次往返，替代逐个关键词循环查询）。
+
+        scope：会话隔离前缀。实体 id 写入时被加上 `{scope}|` 前缀，
+        检索时用 STARTS WITH 限定只返回本会话的实体，避免不同研究串联。
+        """
         if not keywords:
             return []
+        scope_filter = "AND e.entity_id STARTS WITH $prefix " if scope else ""
+        params: dict = {"keywords": keywords, "limit": limit}
+        if scope:
+            params["prefix"] = f"{scope}|"
         results = await self._run(
-            "UNWIND $keywords AS kw MATCH (e) WHERE e.name CONTAINS kw "
+            f"UNWIND $keywords AS kw MATCH (e) WHERE e.name CONTAINS kw "
+            f"{scope_filter}"
             "RETURN DISTINCT e LIMIT $limit",
-            {"keywords": keywords, "limit": limit},
+            params,
         )
         return [dict(r["e"]) for r in results]
 

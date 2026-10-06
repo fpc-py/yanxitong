@@ -54,20 +54,35 @@ class VectorStore:
             self._next_id = start_id + len(docs)
         return ids
 
-    def search(self, query: str, top_k: int = 10) -> list[dict]:
-        """Search for documents similar to query. Returns docs with scores."""
+    def search(self, query: str, top_k: int = 10, scope: Optional[str] = None) -> list[dict]:
+        """Search for documents similar to query. Returns docs with scores.
+
+        When ``scope`` is given (a session id), only documents indexed under
+        that scope are returned — this is what keeps one research question's
+        corpus from leaking into another's RAG context. FAISS cannot filter
+        natively, so a wider candidate window is fetched and post-filtered.
+        """
         if self.index.ntotal == 0:
             return []
         query_embedding = self._embed([query])
-        k = min(top_k, self.index.ntotal)
+        if scope:
+            k = min(self.index.ntotal, max(top_k * 8, 64))
+        else:
+            k = min(top_k, self.index.ntotal)
         with self._lock:
             scores, indices = self.index.search(query_embedding, k)
         results = []
         for score, idx in zip(scores[0], indices[0]):
-            if idx >= 0 and idx in self._documents:
-                doc = dict(self._documents[idx])
-                doc["similarity"] = float(score)
-                results.append(doc)
+            if idx < 0 or idx not in self._documents:
+                continue
+            doc = self._documents[idx]
+            if scope and doc.get("scope") != scope:
+                continue
+            doc = dict(doc)
+            doc["similarity"] = float(score)
+            results.append(doc)
+            if len(results) >= top_k:
+                break
         return results
 
     def save(self, path: str):
@@ -105,5 +120,6 @@ _vector_store: Optional[VectorStore] = None
 def get_vector_store() -> VectorStore:
     global _vector_store
     if _vector_store is None:
-        _vector_store = VectorStore()
+        settings = get_settings()
+        _vector_store = VectorStore(index_path=settings.retriever.index_path)
     return _vector_store

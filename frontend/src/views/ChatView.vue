@@ -5,8 +5,10 @@ import { ElMessage } from 'element-plus'
 import MarkdownView from '@/components/MarkdownView.vue'
 import CitationList from '@/components/CitationList.vue'
 import { useSessionStore } from '@/stores/session'
+import { useAuthStore } from '@/stores/auth'
 
 const store = useSessionStore()
+const auth = useAuthStore()
 
 const topicInput = ref('')
 const queryInput = ref('')
@@ -73,6 +75,20 @@ function reset(): void {
     </header>
 
     <div class="stagger stack">
+      <!-- 未登录配额提示：始终可见，用尽时转为警示并引导注册 -->
+      <div v-if="!auth.isLoggedIn" class="quota-strip" :class="{ 'is-exhausted': auth.quotaExhausted }">
+        <span class="qs-dot" />
+        <span v-if="auth.quotaExhausted">
+          免费体验次数已用完 —— 注册 / 登录后可继续提问，研究数据将保存到你的账号
+        </span>
+        <span v-else>
+          未登录免费体验中 · 剩余 <b class="mono">{{ auth.remaining ?? '—' }}</b> 次
+        </span>
+        <button class="qs-link" type="button" @click="auth.openAuth(auth.quotaExhausted ? 'register' : 'login')">
+          {{ auth.quotaExhausted ? '去注册' : '注册 / 登录' }}
+        </button>
+      </div>
+
       <!-- 未建立会话：创建表单 -->
       <section v-if="!store.hasSession" class="panel composer-hollow">
         <div class="panel-body create-body">
@@ -186,6 +202,63 @@ function reset(): void {
 </template>
 
 <style scoped>
+/* 未登录配额提示条 */
+.quota-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12.5px;
+}
+
+.quota-strip.is-exhausted {
+  border-color: var(--danger-line);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.qs-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: currentColor;
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.quota-strip.is-exhausted .qs-dot {
+  box-shadow: 0 0 0 3px var(--danger-soft);
+}
+
+.qs-link {
+  margin-left: auto;
+  flex: 0 0 auto;
+  padding: 3px 12px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  font-family: var(--font-body);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s var(--ease);
+}
+
+.qs-link:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.quota-strip.is-exhausted .qs-link:hover {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
 .create-body {
   display: flex;
   flex-direction: column;

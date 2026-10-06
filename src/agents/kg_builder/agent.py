@@ -82,6 +82,18 @@ class KGBuilderAgent(BaseAgent):
             all_relations.extend(res.get("relations", []))
             processed += 1
 
+        # 图谱按「研究问题（会话）」隔离：实体/关系 id 加会话前缀后写入，
+        # 不同会话抽取的实体互不合并、检索时按前缀过滤，避免跨会话串图。
+        scope = state.get("session_id", "")
+        if scope:
+            all_entities = [{**e, "id": f"{scope}|{e.get('id', '')}"} for e in all_entities]
+            all_relations = [
+                {**r,
+                 "source_id": f"{scope}|{r.get('source_id', '')}",
+                 "target_id": f"{scope}|{r.get('target_id', '')}"}
+                for r in all_relations
+            ]
+
         self._audit("kg_done", {"processed": processed, "entities": len(all_entities), "relations": len(all_relations)})
         try:
             gs = await get_graph_store()

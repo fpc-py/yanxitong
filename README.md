@@ -37,12 +37,17 @@ pip install -r requirements.txt
 
 #PyYAML 6.0.1 已经为 Windows 提供了预编译的 wheel 包，无需本地编译，完全绕开 Cython 和策略问题。
 
-# 3. 启动全部服务
+# 3. 启动后端与依赖服务（MySQL 账号库映射到宿主 3309，避开本机 MySQL）
 docker compose up -d
 
-# 4. 验证
+# 4. 启动前端工作台（开发模式，已代理 /api → 8001）
+cd frontend && npm install && npm run dev   # http://localhost:4321
+
+# 5. 验证
 curl http://localhost:8001/api/health
 ```
+
+> 未登录即可直接使用：匿名免费问答 5 次；注册 / 登录后以账号身份提问，研究数据保存到账号。
 
 ## 📡 API 参考
 
@@ -58,8 +63,23 @@ curl http://localhost:8001/api/health
 | `POST` | `/api/session/{id}/write` | 论文写作 |
 | `POST` | `/api/session/{id}/review` | 论文审稿 |
 | `POST` | `/api/session/{id}/bibliography` | 格式化参考文献 |
+| `POST` | `/api/auth/register` | 注册账号，返回 Bearer 令牌 |
+| `POST` | `/api/auth/login` | 登录，返回 Bearer 令牌 |
+| `POST` | `/api/auth/logout` | 登出（吊销令牌） |
+| `GET` | `/api/auth/me` | 当前身份与匿名配额 |
 | `GET` | `/api/session/{id}` | 会话状态 |
 | `GET` | `/api/session/{id}/citation-chain` | 引用溯源链 |
+
+### 账号与配额（演示模式）
+
+- 未登录可用：前端自动携带 `X-Anon-Id` 标识匿名身份，免费问答 5 次；仅「创建会话 / 继续提问」计数，分析、设计、写作、审稿、上传不计次。
+- 登录身份：注册 / 登录后请求头携带 `Authorization: Bearer <token>`，以账号身份提问（不占用匿名配额）。
+- 身份隔离：会话、知识库、向量索引与知识图谱均按身份隔离，不同用户及匿名身份的研究数据互不可见。
+
+### 数据持久化
+
+- 账号 / 令牌 / 匿名配额在 MySQL，知识图谱在 Neo4j，语义缓存在 Redis（均容器卷持久化）。
+- 会话状态（历史会话 / 引用链）、论文向量索引、上传文件落盘于 `data/`（compose 挂载 `app-data` 卷），后端重启后自动恢复。
 
 ## 🛡️ 六道幻觉防线
 

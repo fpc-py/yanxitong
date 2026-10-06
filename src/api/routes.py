@@ -1,8 +1,8 @@
 """FastAPI routes v3.0 — full 5-link chain: find→read→compute→write→review."""
 
-import uuid, os, logging, tempfile
+import uuid, os, logging
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request
 from pathlib import Path
 
 from src.api.schemas import (
@@ -12,6 +12,9 @@ from src.api.schemas import (
     SystemCapabilities, DefenseItem, MetricsSummary,
     KnowledgeFileItem, KnowledgeUploadResult,
 )
+from src.api.deps import Identity, consume_question_quota, get_identity
+from src.api.auth_routes import router as auth_router
+from src.api import session_store
 from src.workflows.state import create_initial_state
 from src.workflows.supervisor_graph import get_research_app
 from src.workflows import tracing
@@ -22,8 +25,28 @@ from src.observability import metrics as metrics_mod
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
-_sessions: dict[str, dict] = {}
-UPLOAD_DIR = Path(tempfile.gettempdir()) / "yanxitong_uploads"
+router.include_router(auth_router)
+# 会话状态：启动时从 SQLite 恢复，之后的每次变更都会写回（后端重启不丢历史会话）
+_sessions: dict[str, dict] = session_store.load_sessions()
+UPLOAD_DIR = Path("data") / "uploads"
+
+
+def _persist_session(session_id: str, state: dict) -> None:
+    """Update in-memory session state and write it through to SQLite."""
+    _sessions[session_id] = state
+    session_store.save_session(session_id, state)
+
+
+def _get_owned_state(session_id: str, identity: Identity) -> dict:
+    """Return the session state, or 404 when missing or owned by someone else.
+
+    会话按身份（user:<id> / anon:<anon_id>）隔离：不同用户、不同浏览器
+    的匿名体验者互相看不到对方的研究会话。
+    """
+    state = _sessions.get(session_id)
+    if not state or state.get("user_id") != identity.label:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    return state
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -32,10 +55,12 @@ async def health_check():
 
 
 @router.post("/session", response_model=QueryResponse)
-async def create_session_and_query(req: QueryRequest):
+async def create_session_and_query(req: QueryRequest, request: Request):
+    identity = await get_identity(request)
+    quota_remaining = await consume_question_quota(identity)
     session_id = req.session_id or str(uuid.uuid4())[:12]
-    state = create_initial_state(session_id=session_id, user_id="default", topic=req.topic, query=req.query)
-    _sessions[session_id] = state
+    state = create_initial_state(session_id=session_id, user_id=identity.label, topic=req.topic, query=req.query)
+    _persist_session(session_id, state)
     app = get_research_app()
     config = {"configurable": {"thread_id": session_id}}
     try:
@@ -43,15 +68,15 @@ async def create_session_and_query(req: QueryRequest):
     except Exception as e:
         logger.exception("Workflow failed for session %s", session_id)
         raise HTTPException(status_code=500, detail=str(e))
-    _sessions[session_id] = result
-    return _build_response(session_id, result)
+    _persist_session(session_id, result)
+    return _build_response(session_id, result, quota_remaining=quota_remaining)
 
 
 @router.post("/session/{session_id}/query", response_model=QueryResponse)
-async def continue_query(session_id: str, req: QueryRequest):
-    state = _sessions.get(session_id)
-    if not state:
-        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+async def continue_query(session_id: str, req: QueryRequest, request: Request):
+    identity = await get_identity(request)
+    state = _get_owned_state(session_id, identity)
+    quota_remaining = await consume_question_quota(identity)
     state["user_query"] = req.query
     state["final_response"] = None
     state["error_message"] = None
@@ -61,17 +86,16 @@ async def continue_query(session_id: str, req: QueryRequest):
         result = await app.ainvoke(state, config)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    _sessions[session_id] = result
-    return _build_response(session_id, result)
+    _persist_session(session_id, result)
+    return _build_response(session_id, result, quota_remaining=quota_remaining)
 
 
 # ---- Phase 2 endpoints ----
 
 @router.post("/session/{session_id}/upload", response_model=UploadResponse)
-async def upload_data_file(session_id: str, file: UploadFile = File(...)):
-    state = _sessions.get(session_id)
-    if not state:
-        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+async def upload_data_file(session_id: str, request: Request, file: UploadFile = File(...)):
+    identity = await get_identity(request)
+    state = _get_owned_state(session_id, identity)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     suffix = Path(file.filename).suffix if file.filename else ".csv"
     file_path = UPLOAD_DIR / f"{session_id}_{uuid.uuid4().hex[:8]}{suffix}"
@@ -80,14 +104,14 @@ async def upload_data_file(session_id: str, file: UploadFile = File(...)):
     state["data_file_path"] = str(file_path)
     # 独立阶段，配合 route_intent/route_after_analysis：上传后只做数据分析
     state["current_phase"] = "data_analysis"
-    _sessions[session_id] = state
+    _persist_session(session_id, state)
     return UploadResponse(session_id=session_id, filename=file.filename, size_bytes=len(content), file_path=str(file_path), message="File uploaded. Use /analyze to run analysis.")
 
 
 @router.post("/session/{session_id}/analyze", response_model=QueryResponse)
-async def analyze_data(session_id: str, req: AnalyzeRequest):
-    state = _sessions.get(session_id)
-    if not state: raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+async def analyze_data(session_id: str, req: AnalyzeRequest, request: Request):
+    identity = await get_identity(request)
+    state = _get_owned_state(session_id, identity)
     state["user_query"] = req.query
     state["current_phase"] = "data_analysis"
     state["final_response"] = None
@@ -98,7 +122,7 @@ async def analyze_data(session_id: str, req: AnalyzeRequest):
         result = await app.ainvoke(state, config)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    _sessions[session_id] = result
+    _persist_session(session_id, result)
     exp = result.get("experiment_results", {}) or {}
     figures = exp.get("figures", []) or []
     stdout = (exp.get("stdout") or "").strip()
@@ -112,9 +136,9 @@ async def analyze_data(session_id: str, req: AnalyzeRequest):
 
 
 @router.post("/session/{session_id}/design", response_model=QueryResponse)
-async def design_experiment(session_id: str, req: QueryRequest):
-    state = _sessions.get(session_id)
-    if not state: raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+async def design_experiment(session_id: str, req: QueryRequest, request: Request):
+    identity = await get_identity(request)
+    state = _get_owned_state(session_id, identity)
     state["user_query"] = req.query or state.get("user_query", "Design experiment")
     # 用独立的 "design" 阶段，避免被 route_intent 误判为数据分析（experiment）而先跑沙箱
     state["current_phase"] = "design"
@@ -126,7 +150,7 @@ async def design_experiment(session_id: str, req: QueryRequest):
         result = await app.ainvoke(state, config)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    _sessions[session_id] = result
+    _persist_session(session_id, result)
     exp = result.get("experiment_results", {})
     design = exp.get("design", {}) if isinstance(exp, dict) else {}
     answer = _format_design_response(design)
@@ -136,11 +160,10 @@ async def design_experiment(session_id: str, req: QueryRequest):
 # ---- Phase 3 endpoints ----
 
 @router.post("/session/{session_id}/write", response_model=QueryResponse)
-async def write_paper(session_id: str, req: QueryRequest):
+async def write_paper(session_id: str, req: QueryRequest, request: Request):
     """Generate a paper section or full draft. Query specifies section: abstract/introduction/methods/results/discussion/full_paper."""
-    state = _sessions.get(session_id)
-    if not state:
-        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    identity = await get_identity(request)
+    state = _get_owned_state(session_id, identity)
 
     section_map = {
         "摘要": "abstract", "abstract": "abstract",
@@ -168,18 +191,17 @@ async def write_paper(session_id: str, req: QueryRequest):
         result = await app.ainvoke(state, config)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    _sessions[session_id] = result
+    _persist_session(session_id, result)
 
     content = result.get("writing_draft", result.get("final_response", ""))
     return QueryResponse(session_id=session_id, answer=content[:5000], confidence=result.get("confidence_scores", {}).get("writing_assistant", 0.5), citations=[], phase="writing")
 
 
 @router.post("/session/{session_id}/review", response_model=QueryResponse)
-async def review_draft(session_id: str, req: ReviewRequest):
+async def review_draft(session_id: str, req: ReviewRequest, request: Request):
     """Enhanced review with style specification. Include style in draft prefix: [APA]/[MLA]/[GBT]."""
-    state = _sessions.get(session_id)
-    if not state:
-        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    identity = await get_identity(request)
+    state = _get_owned_state(session_id, identity)
 
     draft = req.draft or state.get("writing_draft", "")
     style = "GB/T 7714"
@@ -199,7 +221,7 @@ async def review_draft(session_id: str, req: ReviewRequest):
         result = await app.ainvoke(state, config)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    _sessions[session_id] = result
+    _persist_session(session_id, result)
 
     # Get review from experiment_results
     exp = result.get("experiment_results", {})
@@ -209,10 +231,10 @@ async def review_draft(session_id: str, req: ReviewRequest):
 
 
 @router.post("/session/{session_id}/bibliography")
-async def format_bibliography(session_id: str, style: str = "gbt7714"):
+async def format_bibliography(session_id: str, request: Request, style: str = "gbt7714"):
     """Generate formatted bibliography from session papers."""
-    state = _sessions.get(session_id)
-    if not state: raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    identity = await get_identity(request)
+    state = _get_owned_state(session_id, identity)
     from src.tools.citation_formatter import CitationFormatter
     papers = state.get("literature_results", [])
     bib = CitationFormatter.format_bibliography(papers, style)
@@ -222,16 +244,16 @@ async def format_bibliography(session_id: str, style: str = "gbt7714"):
 # ---- Session info endpoints ----
 
 @router.get("/session/{session_id}", response_model=SessionStatus)
-async def get_session_status(session_id: str):
-    state = _sessions.get(session_id)
-    if not state: raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+async def get_session_status(session_id: str, request: Request):
+    identity = await get_identity(request)
+    state = _get_owned_state(session_id, identity)
     return SessionStatus(session_id=session_id, topic=state.get("research_topic",""), current_phase=state.get("current_phase","literature"), papers_count=len(state.get("literature_results",[])), kg_entities_count=0, confidence_scores=state.get("confidence_scores",{}), human_review_required=state.get("human_review_required",False), error=state.get("error_message"), has_data_file=bool(state.get("data_file_path","")))
 
 
 @router.get("/session/{session_id}/citation-chain", response_model=CitationChainResponse)
-async def get_citation_chain(session_id: str):
-    state = _sessions.get(session_id)
-    if not state: raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+async def get_citation_chain(session_id: str, request: Request):
+    identity = await get_identity(request)
+    state = _get_owned_state(session_id, identity)
     chain = state.get("citation_chain", [])
     if isinstance(chain, dict): chain = chain.get("claims", [])
     avg_conf = sum(c.get("confidence",0) for c in chain) / len(chain) if chain else 0.0
@@ -239,9 +261,14 @@ async def get_citation_chain(session_id: str):
 
 
 @router.get("/sessions", response_model=list[SessionListItem])
-async def list_sessions():
-    """按创建时间倒序返回全部会话摘要（最近创建在前）。"""
-    return [_session_summary(sid, st) for sid, st in reversed(list(_sessions.items()))]
+async def list_sessions(request: Request):
+    """按创建时间倒序返回「当前身份」的会话摘要（会话按用户隔离）。"""
+    identity = await get_identity(request)
+    return [
+        _session_summary(sid, st)
+        for sid, st in reversed(list(_sessions.items()))
+        if st.get("user_id") == identity.label
+    ]
 
 
 # ---- 系统能力 / 实时指标 / 知识库 ----
@@ -345,8 +372,12 @@ def _extract_pdf(data: bytes) -> str:
 
 
 @router.post("/knowledge/upload", response_model=KnowledgeUploadResult)
-async def upload_knowledge(file: UploadFile = File(...)):
-    """上传文档入库（txt/md 直接解析；pdf 需 pypdf），分块嵌入到知识库 FAISS 索引。"""
+async def upload_knowledge(request: Request, file: UploadFile = File(...)):
+    """上传文档入库（txt/md 直接解析；pdf 需 pypdf），分块嵌入到知识库 FAISS 索引。
+
+    文档记录上传者身份，列表/删除仅对上传者可见（用户间知识库隔离）。
+    """
+    identity = await get_identity(request)
     filename = Path(file.filename).name if file.filename else "unnamed"
     suffix = Path(filename).suffix.lower()
     if suffix not in (".txt", ".md", ".pdf"):
@@ -358,29 +389,36 @@ async def upload_knowledge(file: UploadFile = File(...)):
     text = (text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="未能从文件中提取文本")
-    added = kb_add_file(filename, text)
+    added = kb_add_file(filename, text, owner=identity.label)
     if added == 0:
         raise HTTPException(status_code=400, detail="文本过短，未形成可检索块")
     return KnowledgeUploadResult(filename=filename, added=added, total_docs=len(get_kb_store()))
 
 
 @router.get("/knowledge/files", response_model=list[KnowledgeFileItem])
-async def list_knowledge_files():
-    return [KnowledgeFileItem(**f) for f in kb_list_files()]
+async def list_knowledge_files(request: Request):
+    identity = await get_identity(request)
+    return [KnowledgeFileItem(**f) for f in kb_list_files(owner=identity.label)]
 
 
 @router.delete("/knowledge/file/{filename}")
-async def delete_knowledge_file(filename: str):
-    removed = kb_remove_file(filename)
+async def delete_knowledge_file(filename: str, request: Request):
+    identity = await get_identity(request)
+    removed = kb_remove_file(filename, owner=identity.label)
     if removed == 0:
         raise HTTPException(status_code=404, detail=f"知识库中没有 {filename}")
     return {"ok": True, "removed": removed}
 
 
 @router.delete("/session/{session_id}")
-async def delete_session(session_id: str):
-    """删除会话；不存在时静默返回 ok。"""
+async def delete_session(session_id: str, request: Request):
+    """删除会话；不存在时静默返回 ok，属于他人时返回 404（不泄露存在性）。"""
+    identity = await get_identity(request)
+    state = _sessions.get(session_id)
+    if state is not None and state.get("user_id") != identity.label:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
     _sessions.pop(session_id, None)
+    session_store.delete_session(session_id)
     return {"ok": True}
 
 
@@ -395,8 +433,8 @@ def _session_summary(session_id: str, state: dict) -> SessionListItem:
     )
 
 
-def _build_response(session_id: str, result: dict) -> QueryResponse:
-    return QueryResponse(session_id=session_id, answer=result.get("final_response","No response generated"), confidence=result.get("confidence_scores",{}).get("supervisor",0.5), citations=result.get("citation_chain",[]), human_review_required=result.get("human_review_required",False), phase=result.get("current_phase","literature"))
+def _build_response(session_id: str, result: dict, quota_remaining: int | None = None) -> QueryResponse:
+    return QueryResponse(session_id=session_id, answer=result.get("final_response","No response generated"), confidence=result.get("confidence_scores",{}).get("supervisor",0.5), citations=result.get("citation_chain",[]), human_review_required=result.get("human_review_required",False), phase=result.get("current_phase","literature"), quota_remaining=quota_remaining)
 
 
 def _format_design_response(design: dict) -> str:

@@ -2,7 +2,9 @@
 // Base URL 走 Vite 代理（/api），不写死后端地址
 
 import axios, { AxiosError, type AxiosInstance } from 'axios'
+import { getAnonId, getToken } from './identity'
 import type {
+  AuthResponse,
   BibliographyResponse,
   Citation,
   CitationChainResponse,
@@ -10,6 +12,7 @@ import type {
   HealthResponse,
   KnowledgeFileItem,
   KnowledgeUploadResult,
+  MeResponse,
   MetricsSummary,
   QueryResponse,
   SessionListItem,
@@ -27,23 +30,44 @@ const http: AxiosInstance = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
+// 每个请求都带上身份：Authorization（已登录）+ X-Anon-Id（匿名配额跟踪）
+http.interceptors.request.use((config) => {
+  config.headers.set('X-Anon-Id', getAnonId())
+  const token = getToken()
+  if (token) config.headers.set('Authorization', `Bearer ${token}`)
+  return config
+})
+
 /** 统一错误信息提取 */
 export function extractErrorMessage(err: unknown): string {
   if (axios.isAxiosError(err)) {
-    const e = err as AxiosError<{ detail?: string; message?: string }>
+    const e = err as AxiosError<{ detail?: unknown; message?: unknown }>
     if (e.code === 'ECONNABORTED') {
       return `请求超时（超过 ${Math.round(REQUEST_TIMEOUT / 1000)} 秒）：后端仍在计算或未启动，请稍后重试。`
     }
     if (!e.response) {
       return '无法连接后端服务：请确认后端已在 http://localhost:8001 启动。'
     }
-    const detail = e.response.data?.detail || e.response.data?.message
+    const detail = e.response.data?.detail ?? e.response.data?.message
     if (Array.isArray(detail)) {
       return `请求参数错误（${e.response.status}）`
     }
-    return `请求失败（HTTP ${e.response.status}）${detail ? '：' + detail : ''}`
+    // 后端业务错误：detail 为 {code, message} 对象（如 QUOTA_EXCEEDED）
+    if (detail && typeof detail === 'object') {
+      const message = (detail as { message?: unknown }).message
+      if (typeof message === 'string' && message) return message
+      return `请求失败（HTTP ${e.response.status}）`
+    }
+    return `请求失败（HTTP ${e.response.status}）${typeof detail === 'string' && detail ? '：' + detail : ''}`
   }
   return err instanceof Error ? err.message : String(err)
+}
+
+/** 判断是否为「未登录免费次数用尽」错误（403 + detail.code=QUOTA_EXCEEDED） */
+export function isQuotaExceeded(err: unknown): boolean {
+  if (!axios.isAxiosError(err) || err.response?.status !== 403) return false
+  const detail = (err.response.data as { detail?: unknown } | undefined)?.detail
+  return !!detail && typeof detail === 'object' && (detail as { code?: string }).code === 'QUOTA_EXCEEDED'
 }
 
 /** 判断是否为「会话不存在」错误（后端重启或会话过期后回 404） */
@@ -248,6 +272,29 @@ const api = {
   /** 18. 删除知识库文件 */
   async deleteKnowledgeFile(name: string): Promise<{ ok: boolean }> {
     const { data } = await http.delete<{ ok: boolean }>(`/knowledge/file/${encodeURIComponent(name)}`)
+    return data
+  },
+
+  /** 19. 注册（成功后自动登录，返回 token） */
+  async register(username: string, password: string): Promise<AuthResponse> {
+    const { data } = await http.post<AuthResponse>('/auth/register', { username, password })
+    return data
+  },
+
+  /** 20. 登录 */
+  async login(username: string, password: string): Promise<AuthResponse> {
+    const { data } = await http.post<AuthResponse>('/auth/login', { username, password })
+    return data
+  },
+
+  /** 21. 登出（吊销当前 token） */
+  async logout(): Promise<void> {
+    await http.post('/auth/logout')
+  },
+
+  /** 22. 当前身份：已登录返回 user，未登录返回匿名配额 */
+  async getMe(): Promise<MeResponse> {
+    const { data } = await http.get<MeResponse>('/auth/me')
     return data
   },
 }

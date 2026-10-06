@@ -23,6 +23,9 @@ PyYAML==6.0.2
 neo4j==5.28.1
 redis==6.2.0
 
+# --- Accounts / anonymous quota (MySQL) ----------------------------------------
+aiomysql==0.2.0
+
 # --- Vector retrieval & embeddings -------------------------------------------
 faiss-cpu==1.11.0.post1
 sentence-transformers==3.4.1

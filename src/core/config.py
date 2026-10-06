@@ -81,6 +81,9 @@ class RetrieverConfig(BaseSettings):
     top_k: int = 10
     """Number of documents returned by vector similarity search."""
 
+    index_path: str = "data/faiss"
+    """On-disk directory for the paper FAISS index (index.faiss + docs.json)."""
+
 
 class KGBuilderConfig(BaseSettings):
     """Ontology and extraction limits for the knowledge-graph builder."""
@@ -175,6 +178,57 @@ class RateLimitConfig(BaseSettings):
     """Maximum requests accepted per client per minute."""
 
 
+class MySQLConfig(BaseSettings):
+    """Connection settings for the MySQL account/quota store."""
+
+    model_config = SettingsConfigDict(env_prefix="MYSQL_", populate_by_name=True, extra="ignore")
+
+    host: str = "127.0.0.1"
+    """MySQL host; docker-compose app service overrides to ``mysql``."""
+
+    port: int = 3309
+    """Host port; compose maps container 3306 to 3309 to avoid clashes with other local MySQLs."""
+
+    user: str = "yanxitong"
+    """Application login user."""
+
+    password: str = "yanxitong"
+    """Application login password (override via ``MYSQL_PASSWORD``)."""
+
+    database: str = "yanxitong"
+    """Schema name holding users / tokens / anonymous quota tables."""
+
+    pool_min: int = 1
+    """Minimum pooled connections kept by aiomysql."""
+
+    pool_max: int = 5
+    """Upper bound of pooled connections."""
+
+
+class AuthConfig(BaseSettings):
+    """Registration, token lifetime and anonymous trial quota policy."""
+
+    model_config = SettingsConfigDict(env_prefix="AUTH_", populate_by_name=True, extra="ignore")
+
+    enabled: bool = True
+    """Master switch; disabling turns every auth endpoint into 503."""
+
+    anonymous_limit: int = 5
+    """Free Q&A requests granted to visitors who have not signed in."""
+
+    token_ttl_days: int = 7
+    """Lifetime of an issued bearer token, in days."""
+
+    username_min_length: int = 2
+    """Minimum accepted username length."""
+
+    username_max_length: int = 32
+    """Maximum accepted username length."""
+
+    password_min_length: int = 6
+    """Minimum accepted password length."""
+
+
 class Neo4jConfig(BaseSettings):
     """Connection settings for the Neo4j knowledge-graph store."""
 
@@ -242,6 +296,8 @@ class Settings(BaseSettings):
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
     neo4j: Neo4jConfig = Field(default_factory=Neo4jConfig)
     redis: RedisConfig = Field(default_factory=RedisConfig)
+    mysql: MySQLConfig = Field(default_factory=MySQLConfig)
+    auth: AuthConfig = Field(default_factory=AuthConfig)
     app: AppConfig = Field(default_factory=AppConfig)
 
     @classmethod

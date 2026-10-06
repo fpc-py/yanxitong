@@ -34,8 +34,7 @@ RUN pip install --no-cache-dir \
         scikit-learn \
         openpyxl
 
-# 中文字形（图表里的中文标题/标签需要它）。放在 pip 层之后，
-# 这样新增字体不会让上面庞大的依赖层缓存失效。
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends fonts-wqy-zenhei \
     && rm -rf /var/lib/apt/lists/*

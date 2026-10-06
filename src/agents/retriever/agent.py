@@ -2,6 +2,7 @@
 
 import asyncio, logging
 from src.agents.base import BaseAgent, AgentResult
+from src.core.config import get_settings
 from src.tools.arxiv import get_arxiv_client
 from src.tools.semantic_scholar import get_ss_client
 from src.knowledge.vector_store import get_vector_store
@@ -38,8 +39,12 @@ class RetrieverAgent(BaseAgent):
         if all_p:
             try:
                 vs = get_vector_store()
-                vs.add_documents(all_p)
-                self._audit("index_complete", {"count": len(all_p)})
+                # scope=session_id：论文按「研究问题（会话）」隔离索引，
+                # 其他会话检索到的论文不会混入本会话的 RAG 上下文。
+                scope = state.get("session_id", "")
+                vs.add_documents([{**p, "scope": scope} for p in all_p])
+                vs.save(get_settings().retriever.index_path)  # 索引落盘，重启后仍可检索
+                self._audit("index_complete", {"count": len(all_p), "scope": scope})
             except Exception as e:
                 logger.warning("Vector store indexing degraded: %s", e)
         for p in all_p[:10]:

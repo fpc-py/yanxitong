@@ -17,8 +17,12 @@ class GraphRAG:
     def __init__(self):
         self.settings = get_settings()
 
-    async def query(self, question: str, top_k: Optional[int] = None) -> dict:
+    async def query(self, question: str, top_k: Optional[int] = None, scope: Optional[str] = None) -> dict:
         """Execute dual-engine query.
+
+        ``scope`` (the session id) restricts both the vector search and the
+        knowledge-graph lookup to the current research question, so one
+        session's corpus never enriches another's answers.
 
         Returns dict with:
             - papers: list of matched papers with similarity scores
@@ -29,8 +33,8 @@ class GraphRAG:
         k = top_k or self.settings.retriever.top_k
         vs = get_vector_store()
 
-        # Step 1: Vector search
-        paper_results = vs.search(question, top_k=k)
+        # Step 1: Vector search (scoped to this research question)
+        paper_results = vs.search(question, top_k=k, scope=scope)
         if not paper_results:
             return {
                 "papers": [],
@@ -54,9 +58,10 @@ class GraphRAG:
 
         try:
             gs = await get_graph_store()
-            # 一次批量查询替代对每个实体名逐个调用 search_entities 的串行往返
+            # 一次批量查询替代对每个实体名逐个调用 search_entities 的串行往返；
+            # scope 限定只命中本会话构建的实体（图谱按研究问题隔离）
             try:
-                kg_entities = await gs.search_entities_multi(list(entity_names)[:20])
+                kg_entities = await gs.search_entities_multi(list(entity_names)[:20], scope=scope)
             except Exception:
                 kg_entities = []
 

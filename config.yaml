@@ -111,6 +111,24 @@ cache:
   similarity_threshold: 0.92
   namespace: "yxt:cache:"
 
+# --- Accounts, tokens and anonymous trial quota ---------------------------------------
+# 用户/令牌/匿名配额存于 MySQL（docker compose up -d mysql 即可，宿主端口 3309）。
+# 演示口径：未登录可免费问答 anonymous_limit 次；登录后以账号身份提问，不占用匿名配额。
+auth:
+  enabled: true
+  anonymous_limit: 5            # 未登录免费问答次数（仅计「问答」：建会话提问 + 继续提问）
+  token_ttl_days: 7             # 登录令牌有效期
+  username_min_length: 2
+  username_max_length: 32
+  password_min_length: 6
+
+mysql:
+  host: 127.0.0.1               # compose 内 app 服务用 MYSQL_HOST=mysql 覆盖
+  port: 3309                    # compose 将容器 3306 映射到宿主 3309，避开本机 MySQL
+  user: yanxitong
+  password: yanxitong           # 生产环境请用 MYSQL_PASSWORD 环境变量覆盖
+  database: yanxitong
+
 # --- API rate limiting ------------------------------------------------------------------
 rate_limit:
   requests_per_minute: 60

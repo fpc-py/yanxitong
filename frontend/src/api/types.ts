@@ -46,6 +46,8 @@ export interface QueryResponse {
   human_review_required: boolean
   phase: string
   figures?: FigureItem[]
+  /** 未登录用户的剩余免费问答次数；已登录或配额服务不可用时为 null */
+  quota_remaining?: number | null
 }
 
 /** 上传文件响应 */
@@ -145,4 +147,32 @@ export interface KnowledgeUploadResult {
   filename: string
   added: number
   total_docs: number
+}
+
+// ---- 认证（对齐 src/api/schemas.py Auth 段） ----
+
+/** 登录用户信息 */
+export interface UserInfo {
+  id: number
+  username: string
+  created_at?: string | null
+}
+
+/** 未登录免费问答配额（仅匿名身份返回） */
+export interface QuotaInfo {
+  limit: number
+  used: number
+  remaining: number
+}
+
+/** 注册/登录响应 */
+export interface AuthResponse {
+  token: string
+  user: UserInfo
+}
+
+/** /auth/me 响应：已登录只带 user，未登录只带 quota */
+export interface MeResponse {
+  user: UserInfo | null
+  quota: QuotaInfo | null
 }

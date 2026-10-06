@@ -4,6 +4,7 @@ import { computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useSessionStore } from '@/stores/session'
 import { useSystemStore } from '@/stores/system'
+import { useAuthStore } from '@/stores/auth'
 
 /** count：导航右侧显示真实计数（取自当前会话），无则回落到英文标签 */
 type CountKey = 'papers' | 'kg' | 'claims'
@@ -84,8 +85,21 @@ const route = useRoute()
 const router = useRouter()
 const store = useSessionStore()
 const system = useSystemStore()
+const auth = useAuthStore()
 
 const activePath = computed(() => route.path)
+
+// ---- 底部用户卡片：身份 + 未登录配额 / 登录后成本 ----
+const avatarChar = computed(() => (auth.isLoggedIn ? auth.displayName.slice(0, 1) : '访'))
+
+const userName = computed(() => (auth.isLoggedIn ? auth.displayName : '未登录访客'))
+
+const userPlan = computed(() => {
+  if (auth.isLoggedIn) return `已登录 · ${costText.value}`
+  if (auth.quotaExhausted) return '免费次数已用完 · 去注册'
+  if (auth.remaining !== null) return `免费体验 · 剩余 ${auth.remaining} 次`
+  return '免费体验 · 注册 / 登录'
+})
 
 // ---- 真实计数：导航右侧提示 & 用户卡片成本 ----
 function countOf(key: CountKey): number {
@@ -190,13 +204,18 @@ onMounted(() => {
       </div>
     </div>
 
-    <div class="side-foot">
-      <div class="avatar">研</div>
+    <button
+      class="side-foot"
+      type="button"
+      :title="auth.isLoggedIn ? '账号' : '注册 / 登录'"
+      @click="auth.openAuth()"
+    >
+      <div class="avatar">{{ avatarChar }}</div>
       <div class="user">
-        <div class="user-name">研究生 · 材料学院</div>
-        <div class="user-plan">Pro · {{ costText }}</div>
+        <div class="user-name">{{ userName }}</div>
+        <div class="user-plan" :class="{ 'is-out': !auth.isLoggedIn && auth.quotaExhausted }">{{ userPlan }}</div>
       </div>
-    </div>
+    </button>
   </nav>
 </template>
 
@@ -443,11 +462,22 @@ onMounted(() => {
 }
 
 .side-foot {
+  width: 100%;
   padding: 14px;
+  border: 0;
   border-top: 1px solid var(--line);
+  background: transparent;
   display: flex;
   align-items: center;
   gap: 10px;
+  text-align: left;
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition: background 0.15s var(--ease);
+}
+
+.side-foot:hover {
+  background: var(--soft);
 }
 
 .avatar {
@@ -481,6 +511,10 @@ onMounted(() => {
 .user-plan {
   font-size: 11px;
   color: var(--ink-3);
+}
+
+.user-plan.is-out {
+  color: var(--danger);
 }
 
 /* ---- 收起态：56px 图标栏（品牌区按钮切换） ---- */

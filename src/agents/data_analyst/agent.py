@@ -41,8 +41,6 @@ Save charts to /output/ (e.g. plt.savefig('/output/chart1.png', dpi=110, bbox_in
 persistent writable directory. Print findings in Chinese with concrete numbers.
 Return ONLY Python code, no markdown fences."""
 
-# 沙箱镜像里装了 WenQuanYi Zen Hei 中文字体，这里统一设置 matplotlib 的中文渲染，
-# 否则图表标题/坐标轴里的中文会显示成方框（tofu）。
 CODE_PREAMBLE = """# --- 环境预设（由平台注入）：无头后端 + 中文字体 ---
 import matplotlib
 matplotlib.use('Agg')

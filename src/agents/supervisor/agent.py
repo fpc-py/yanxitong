@@ -68,7 +68,8 @@ class SupervisorAgent(BaseAgent):
         # GraphRAG context
         try:
             graphrag = await get_graphrag()
-            rag = await graphrag.query(query)
+            # scope=session_id：检索限定在本研究问题（会话）自己的论文索引与图谱子图上
+            rag = await graphrag.query(query, scope=state.get("session_id"))
             ctx = rag.get("fused_context", "")
             citations = rag.get("citations", [])
         except Exception as e:

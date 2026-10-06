@@ -49,6 +49,8 @@ dependencies = [
     # Knowledge graph & cache
     "neo4j",
     "redis",
+    # Accounts / anonymous quota (MySQL)
+    "aiomysql",
     # Vector retrieval & embeddings
     "faiss-cpu",
     "sentence-transformers",
