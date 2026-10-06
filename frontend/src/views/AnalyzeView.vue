@@ -227,7 +227,7 @@ async function runAnalyze(): Promise<void> {
   padding: 8px;
   border: 1px solid var(--hair);
   border-radius: var(--radius);
-  background: rgba(11, 15, 20, 0.5);
+  background: rgba(255, 255, 255, 0.9);
 }
 
 .figure-item img {
@@ -257,8 +257,8 @@ async function runAnalyze(): Promise<void> {
   border-radius: var(--radius);
   background: repeating-linear-gradient(
     45deg,
-    rgba(36, 48, 67, 0.12) 0,
-    rgba(36, 48, 67, 0.12) 8px,
+    rgba(232, 228, 217, 0.5) 0,
+    rgba(232, 228, 217, 0.5) 8px,
     transparent 8px,
     transparent 16px
   );
@@ -346,7 +346,7 @@ async function runAnalyze(): Promise<void> {
   padding: 10px 12px;
   border: 1px solid var(--hair-soft);
   border-radius: var(--radius-sm);
-  background: rgba(20, 27, 38, 0.5);
+  background: rgba(255, 255, 255, 0.9);
 }
 
 .rec-head {

@@ -140,7 +140,7 @@ async function copy(): Promise<void> {
   padding: 13px 15px;
   border: 1px solid var(--hair);
   border-radius: var(--radius);
-  background: rgba(20, 27, 38, 0.5);
+  background: rgba(255, 255, 255, 0.9);
   cursor: pointer;
   text-align: left;
   transition: all 0.2s var(--ease);

@@ -1,13 +1,17 @@
 <script setup lang="ts">
-// 应用外壳：顶部状态条 + 左侧导航 + 非对称主区 + 右侧可折叠 Inspector
+// 应用外壳：左侧导航 + 主区（顶栏 + 视图）+ 右侧可折叠 Inspector（对应 v3.0 原型）
 import { onMounted, onUnmounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import TopStatusBar from '@/components/TopStatusBar.vue'
 import SideNav from '@/components/SideNav.vue'
 import InspectorPanel from '@/components/InspectorPanel.vue'
+import GlobalComposer from '@/components/GlobalComposer.vue'
 import { useSessionStore } from '@/stores/session'
 
 const store = useSessionStore()
-const inspectorOpen = ref(true)
+const route = useRoute()
+const inspectorOpen = ref(false)
+const navCollapsed = ref(false)
 let healthTimer: number | null = null
 
 onMounted(() => {
@@ -28,44 +32,67 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app-shell">
-    <TopStatusBar />
+  <div class="app-shell" :class="{ 'insp-hidden': !inspectorOpen, 'nav-hidden': navCollapsed }">
+    <SideNav :collapsed="navCollapsed" @toggle="navCollapsed = !navCollapsed" />
 
-    <div class="app-body">
-      <SideNav />
-
-      <main class="app-main">
+    <main class="app-main">
+      <TopStatusBar />
+      <div class="main-inner">
         <router-view v-slot="{ Component }">
           <transition name="panel-fade" mode="out-in">
             <component :is="Component" />
           </transition>
         </router-view>
-      </main>
+      </div>
 
-      <InspectorPanel v-model:open="inspectorOpen" />
-    </div>
+      <!-- 全局底部输入条（置于主区滚动容器内，sticky 定位自然居中于内容区；聊天页自带输入区故不重复展示） -->
+      <GlobalComposer v-if="route.path !== '/chat'" />
+    </main>
+
+    <InspectorPanel v-model:open="inspectorOpen" />
   </div>
 </template>
 
 <style scoped>
 .app-shell {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: var(--nav-w) minmax(0, 1fr) var(--inspector-w);
+  grid-template-areas: 'side main insp';
   height: 100vh;
   overflow: hidden;
+  transition: grid-template-columns 0.25s ease;
 }
 
-.app-body {
-  flex: 1 1 auto;
-  display: flex;
-  min-height: 0;
+.app-shell.insp-hidden {
+  /* 收缩后保留 34px 竖条：与 InspectorPanel 的 is-closed 宽度一致，
+     使展开按钮始终可见可点 */
+  grid-template-columns: var(--nav-w) minmax(0, 1fr) 34px;
+}
+
+/* 侧边栏收起为 56px 图标栏（品牌区按钮切换） */
+.app-shell.nav-hidden,
+.app-shell.nav-hidden.insp-hidden {
+  grid-template-columns: 56px minmax(0, 1fr) 34px;
+}
+
+.app-shell.nav-hidden:not(.insp-hidden) {
+  grid-template-columns: 56px minmax(0, 1fr) var(--inspector-w);
 }
 
 .app-main {
-  flex: 1 1 auto;
+  grid-area: main;
   min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 22px 26px 40px;
+  display: flex;
+  flex-direction: column;
+}
+
+.main-inner {
+  flex: 1 1 auto;
+  max-width: 980px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 36px 32px 160px;
 }
 </style>

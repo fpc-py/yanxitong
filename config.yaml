@@ -16,7 +16,7 @@ app:
 llm:
   provider: dashscope            # OpenAI-compatible endpoint of Alibaba Cloud
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-  api_key_env: sk-ws-H.PDDPXXP.nl0l.MEUCIQDcjU5sejGwQ0f_RbF1fpPf8bvDXgxoUP3kMHJ8ywFX3wIgLNt6Ft8AMJ_j3La2JLyXJAg2y_bvFENTULSV5qjd4AI
+  api_key_env: DASHSCOPE_API_KEY
   default:
     temperature: 0.3
     max_tokens: 4096

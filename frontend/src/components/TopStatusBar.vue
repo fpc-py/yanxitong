@@ -1,166 +1,109 @@
 <script setup lang="ts">
-// 顶部细状态条：后端在线状态、版本、特性标签，15 秒轮询刷新
+// 主区顶栏（对应 v3.0 原型）：左侧面包屑 + 右侧状态胶囊；15 秒轮询刷新
 import { computed } from 'vue'
+import { useRoute } from 'vue-router'
 import { useSessionStore } from '@/stores/session'
 
 const store = useSessionStore()
+const route = useRoute()
 
-const online = computed(() => !!store.health && !store.healthError)
+const VIEW_NAMES: Record<string, string> = {
+  overview: '概览',
+  chat: '研究对话',
+  literature: '文献库',
+  kg: '知识图谱',
+  analyze: '数据分析',
+  design: '实验设计',
+  write: '论文写作',
+  review: '学术审阅',
+  bibliography: '参考文献',
+}
 
-const versionText = computed(() => (store.health ? `v${store.health.version}` : '—'))
-
-const checkedAt = computed(() => {
-  const ts = store.health?.timestamp
-  if (!ts) return '尚未连通'
-  const d = new Date(ts)
-  if (Number.isNaN(d.getTime())) return ts
-  return d.toLocaleTimeString('zh-CN')
+const crumb = computed(() => {
+  const name = VIEW_NAMES[route.path.replace(/^\//, '')] ?? '工作台'
+  return name
 })
 
-// 特性标签最多展示 7 个，其余折叠计数
-const features = computed(() => store.health?.features ?? [])
-const visibleFeatures = computed(() => features.value.slice(0, 7))
-const restCount = computed(() => Math.max(0, features.value.length - visibleFeatures.value.length))
+const online = computed(() => !!store.health && !store.healthError)
+const versionText = computed(() => (store.health ? `v${store.health.version}` : '—'))
 
 const stateText = computed(() => {
   if (store.healthError) return '后端离线'
-  if (!store.health) return '检测中'
+  if (!store.health) return '连接中'
   return '后端在线'
 })
+
+const confidencePct = computed(() => Math.round(store.averageConfidence * 100))
 </script>
 
 <template>
   <header class="topbar">
-    <div class="brand">
-      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
-        <rect x="1.5" y="1.5" width="29" height="29" rx="7" fill="none" stroke="var(--accent-line)" />
-        <path d="M16 7v18M7 16h18" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round" />
-        <circle cx="16" cy="16" r="4.4" fill="none" stroke="var(--accent)" stroke-width="1.2" opacity="0.7" />
-      </svg>
-      <div class="brand-text">
-        <span class="brand-name">研析通</span>
-        <span class="brand-sub mono">RESEARCH&nbsp;WORKBENCH · v3.0</span>
-      </div>
+    <div class="crumb">
+      研析通 · Research Copilot <span class="sep-c">/</span> <b>{{ crumb }}</b>
     </div>
 
-    <div class="status-inline">
-      <span class="dot" :class="store.healthError ? 'is-err' : online ? 'is-ok' : 'is-warn'" />
-      <span class="status-text">{{ stateText }}</span>
-      <span class="sep" />
-      <span class="mono meta">{{ versionText }}</span>
-      <span class="sep" />
-      <span class="mono meta">FEATURES {{ features.length }}</span>
-      <span class="sep" />
-      <span class="mono meta">SYNC {{ checkedAt }}</span>
-    </div>
-
-    <div class="features">
-      <span v-for="f in visibleFeatures" :key="f" class="chip">{{ f }}</span>
-      <span v-if="restCount > 0" class="chip is-accent">+{{ restCount }}</span>
-      <span v-if="store.sessionId" class="chip is-accent session-chip" :title="store.sessionId">
+    <div class="top-actions">
+      <span class="pill">
+        <span class="d" :class="store.healthError ? 'is-err' : online ? '' : 'is-warn'" />
+        {{ stateText }} · {{ versionText }}
+      </span>
+      <span v-if="store.averageConfidence > 0" class="pill accent">置信度 {{ confidencePct }}%</span>
+      <span v-if="store.sessionId" class="pill mono session-pill" :title="store.sessionId">
         SESSION {{ store.sessionId }}
       </span>
-      <span v-else class="chip is-amber">未建立会话</span>
     </div>
   </header>
 </template>
 
 <style scoped>
 .topbar {
-  flex: 0 0 auto;
-  height: var(--topbar-h);
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  padding: 0 18px;
-  border-bottom: 1px solid var(--hair);
-  background: linear-gradient(180deg, rgba(11, 15, 20, 0.94), rgba(11, 15, 20, 0.78));
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: rgba(250, 249, 245, 0.88);
   backdrop-filter: blur(10px);
-  position: relative;
-  z-index: 20;
-}
-
-.topbar::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -1px;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--accent-line) 22%, transparent 62%);
-  opacity: 0.7;
-}
-
-.brand {
+  border-bottom: 1px solid var(--line-soft);
+  padding: 13px 32px;
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex: 0 0 auto;
+  justify-content: space-between;
+  gap: 16px;
 }
 
-.brand-mark {
-  width: 26px;
-  height: 26px;
-}
-
-.brand-text {
-  display: flex;
-  flex-direction: column;
-  line-height: 1.15;
-}
-
-.brand-name {
-  font-family: var(--font-display);
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
-.brand-sub {
-  font-size: 9px;
-  letter-spacing: 0.14em;
-  color: var(--text-3);
-}
-
-.status-inline {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  flex: 0 0 auto;
-}
-
-.status-text {
+.crumb {
   font-size: 12.5px;
-  color: var(--text-2);
+  color: var(--ink-2);
 }
 
-.sep {
-  width: 1px;
-  height: 12px;
-  background: var(--hair);
+.crumb b {
+  color: var(--ink);
+  font-weight: 500;
 }
 
-.meta {
-  font-size: 10.5px;
-  letter-spacing: 0.08em;
-  color: var(--text-3);
+.sep-c {
+  color: var(--ink-3);
+  margin: 0 4px;
 }
 
-.features {
-  margin-left: auto;
+.top-actions {
   display: flex;
+  gap: 8px;
   align-items: center;
-  gap: 6px;
-  overflow: hidden;
-  mask-image: linear-gradient(90deg, transparent, #000 16px);
 }
 
-.session-chip {
-  letter-spacing: 0.06em;
-  max-width: 190px;
+.pill .d.is-err {
+  background: var(--danger);
+}
+
+.pill .d.is-warn {
+  background: var(--amber);
+}
+
+.session-pill {
+  letter-spacing: 0.04em;
+  max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
-  display: inline-block;
-  line-height: 20px;
+  white-space: nowrap;
 }
 </style>

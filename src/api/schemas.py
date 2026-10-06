@@ -1,6 +1,6 @@
 """Pydantic schemas v3.0 — full 5-link chain support."""
 
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -59,6 +59,54 @@ class SessionStatus(BaseModel):
     error: Optional[str] = None
     has_data_file: bool = False
     has_draft: bool = False
+
+
+class SessionListItem(BaseModel):
+    session_id: str
+    topic: str
+    papers_count: int
+
+
+class DefenseItem(BaseModel):
+    key: str
+    label: str
+    active: bool
+    note: str = ""
+
+
+class SystemCapabilities(BaseModel):
+    sandbox_mode: Literal["docker", "mock"]
+    defenses: list[DefenseItem] = Field(default_factory=list)
+    last_trace_id: Optional[str] = None
+    eval_layers: int = 4
+
+
+class MetricsSummary(BaseModel):
+    cost_cents: float = 0.0
+    total_tokens: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    request_count: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
+    hallucination_flags: dict[str, int] = Field(default_factory=dict)
+    guard_blocks: int = 0
+    errors: int = 0
+    avg_latency_s: float = 0.0
+
+
+class KnowledgeFileItem(BaseModel):
+    filename: str
+    chunks: int
+    chars: int
+    updated_at: str = ""
+    preview: str = ""
+
+
+class KnowledgeUploadResult(BaseModel):
+    filename: str
+    added: int
+    total_docs: int
 
 
 class CitationChainResponse(BaseModel):

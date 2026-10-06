@@ -129,7 +129,7 @@ async function reload(): Promise<void> {
   padding: 15px 16px;
   border: 1px solid var(--hair-soft);
   border-radius: var(--radius);
-  background: rgba(20, 27, 38, 0.5);
+  background: rgba(255, 255, 255, 0.9);
   transition: border-color 0.2s var(--ease);
 }
 

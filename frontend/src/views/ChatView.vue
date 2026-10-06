@@ -207,7 +207,7 @@ function reset(): void {
 
 .quick {
   border: 1px solid var(--hair);
-  background: rgba(26, 35, 49, 0.55);
+  background: rgba(184, 84, 58, 0.05);
   color: var(--text-2);
   font-family: var(--font-body);
   font-size: 12px;
@@ -300,7 +300,7 @@ function reset(): void {
   border-radius: var(--radius-sm);
   border: 1px solid var(--hair-soft);
   border-left: 2px solid var(--accent-line);
-  background: rgba(26, 35, 49, 0.34);
+  background: rgba(184, 84, 58, 0.05);
   white-space: pre-wrap;
 }
 
@@ -313,7 +313,7 @@ function reset(): void {
   border-radius: var(--radius-sm);
   border: 1px solid var(--amber-line);
   background: var(--amber-soft);
-  color: #f0d49a;
+  color: #7a5a18;
   font-size: 12.5px;
   line-height: 1.55;
 }

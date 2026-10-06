@@ -3,7 +3,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import api, { REQUEST_TIMEOUT, claimConfidence, claimText, extractErrorMessage, flattenCitations, isNotFound } from '@/api/client'
-import type { Citation, Claim, HealthResponse, SessionStatus } from '@/api/types'
+import type { Citation, Claim, HealthResponse, SessionListItem, SessionStatus } from '@/api/types'
 
 /** 一条问答记录 */
 export interface ChatMessage {
@@ -94,6 +94,11 @@ export const useSessionStore = defineStore('session', () => {
 
   // ---- 问答 ----
   const messages = ref<ChatMessage[]>(readStoredMessages())
+
+  // ---- 历史会话列表 ----
+  const sessionList = ref<SessionListItem[]>([])
+  /** 是否已完成至少一次拉取（用于侧栏“暂无历史会话”空态，加载中不显示） */
+  const sessionLoaded = ref(false)
 
   // ---- 加载 / 错误 / 计时 ----
   const loading = ref(false)
@@ -238,6 +243,7 @@ export const useSessionStore = defineStore('session', () => {
     }
 
     setSessionId(res.session_id)
+    void loadSessions() // 新建会话后刷新历史列表，保持最新
     if (topicInput) topic.value = topicInput
     pushMessage({
       role: 'assistant',
@@ -254,6 +260,15 @@ export const useSessionStore = defineStore('session', () => {
 
   /** 切换/恢复会话：重置本地历史 */
   function resetSession(): void {
+    const oldId = sessionId.value
+    if (oldId) {
+      // 把当前会话消息存入专属 key，避免“新研究任务”后历史丢失
+      try {
+        localStorage.setItem(`${MESSAGES_KEY}.${oldId}`, JSON.stringify(messages.value.slice(-MAX_STORED_MESSAGES)))
+      } catch {
+        /* 静默 */
+      }
+    }
     setSessionId(null)
     topic.value = ''
     status.value = null
@@ -264,6 +279,63 @@ export const useSessionStore = defineStore('session', () => {
     error.value = null
     lastLatencyMs.value = null
     latencyLog.value = []
+    void loadSessions()
+  }
+
+  /** 拉取后端全部会话摘要；失败静默（清空列表即可，不弹错） */
+  async function loadSessions(): Promise<void> {
+    try {
+      sessionList.value = await api.getSessions()
+    } catch {
+      sessionList.value = []
+    } finally {
+      sessionLoaded.value = true
+    }
+  }
+
+  /** 在历史会话之间切换：按会话保存/恢复本地消息，再拉取新会话状态 */
+  async function switchSession(id: string): Promise<void> {
+    // 1. 先把当前会话消息存入专属 key
+    const currentId = sessionId.value
+    if (currentId) {
+      try {
+        localStorage.setItem(`${MESSAGES_KEY}.${currentId}`, JSON.stringify(messages.value.slice(-MAX_STORED_MESSAGES)))
+      } catch {
+        /* 静默 */
+      }
+    }
+    // 2. 读回目标会话消息（没有则清空）
+    let restored: ChatMessage[] = []
+    try {
+      const raw = localStorage.getItem(`${MESSAGES_KEY}.${id}`)
+      const parsed = raw ? (JSON.parse(raw) as ChatMessage[]) : []
+      restored = Array.isArray(parsed) ? parsed : []
+    } catch {
+      restored = []
+    }
+    messages.value = restored
+    writeStoredMessages(messages.value) // MESSAGES_KEY 与当前会话保持同步，刷新后不串台
+    // 3. 切换会话标识并清空会话级状态
+    setSessionId(id)
+    topic.value = ''
+    status.value = null
+    claims.value = []
+    averageConfidence.value = 0
+    error.value = null
+    lastLatencyMs.value = null
+    latencyLog.value = []
+    // 4. 拉取目标会话状态（404 时已有逻辑会自动 reset）
+    await refreshStatus()
+    await loadCitationChain()
+    await loadSessions()
+  }
+
+  /** 删除历史会话；删除的正是当前会话时重置本地状态 */
+  async function removeSession(id: string): Promise<void> {
+    const wasCurrent = sessionId.value === id
+    await api.deleteSession(id)
+    if (wasCurrent) resetSession()
+    await loadSessions()
   }
 
   const hasSession = computed(() => !!sessionId.value)
@@ -313,6 +385,8 @@ export const useSessionStore = defineStore('session', () => {
     claims,
     averageConfidence,
     messages,
+    sessionList,
+    sessionLoaded,
     loading,
     activeLabel,
     error,
@@ -334,6 +408,9 @@ export const useSessionStore = defineStore('session', () => {
     loadCitationChain,
     sendQuery,
     resetSession,
+    loadSessions,
+    switchSession,
+    removeSession,
     runTask,
     pushMessage,
   }

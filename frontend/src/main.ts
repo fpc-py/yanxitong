@@ -3,9 +3,8 @@ import { createPinia } from 'pinia'
 import ElementPlus from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 
-// Element Plus 基础样式与深色变量
+// Element Plus 基础样式（浅色 · 暖纸编辑部主题由 theme.css 覆盖变量）
 import 'element-plus/dist/index.css'
-import 'element-plus/theme-chalk/dark/css-vars.css'
 
 // 本地打包字体（避免访问 Google Fonts）
 import '@fontsource/spectral/400.css'

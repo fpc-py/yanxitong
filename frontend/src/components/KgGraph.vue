@@ -136,11 +136,11 @@ function buildOption(): echarts.EChartsOption {
     animationDuration: 700,
     animationEasingUpdate: 'quinticInOut',
     tooltip: {
-      backgroundColor: 'rgba(10,15,22,.96)',
-      borderColor: '#243043',
+      backgroundColor: 'rgba(255,255,255,0.97)',
+      borderColor: '#E8E4D9',
       borderWidth: 1,
       padding: [8, 11],
-      textStyle: { color: '#E6EDF6', fontSize: 12, fontFamily: 'IBM Plex Sans, sans-serif' },
+      textStyle: { color: '#1A1814', fontSize: 12, fontFamily: 'IBM Plex Sans, sans-serif' },
       formatter: (p: any) => {
         const d = p && p.data ? (p.data as GraphNode) : null
         if (!d) return ''
@@ -148,16 +148,16 @@ function buildOption(): echarts.EChartsOption {
         if (d.category === 0) {
           return [
             '<div style="max-width:280px;white-space:normal;line-height:1.5">',
-            `<b style="color:#3DD6C4">结论</b><br/>${d.name}`,
-            `<br/><span style="color:#8FA0B5">置信度 ${((d.confidence ?? 0) * 100).toFixed(0)}%　证据 ${d.degree ?? 0} 条</span>`,
+            `<b style="color:#B8543A">结论</b><br/>${d.name}`,
+            `<br/><span style="color:#7A7468">置信度 ${((d.confidence ?? 0) * 100).toFixed(0)}%　证据 ${d.degree ?? 0} 条</span>`,
             '</div>',
           ].join('')
         }
         return [
           '<div style="max-width:280px;white-space:normal;line-height:1.5">',
-          `<b style="color:#E8B04B">论文</b><br/>${d.name}`,
-          d.authors ? `<br/><span style="color:#8FA0B5">${d.authors}</span>` : '',
-          d.source ? `<br/><span style="color:#5C6B7E">${d.source}</span>` : '',
+          `<b style="color:#5C7A6A">论文</b><br/>${d.name}`,
+          d.authors ? `<br/><span style="color:#7A7468">${d.authors}</span>` : '',
+          d.source ? `<br/><span style="color:#A8A296">${d.source}</span>` : '',
           '</div>',
         ].join('')
       },
@@ -169,7 +169,7 @@ function buildOption(): echarts.EChartsOption {
         icon: 'circle',
         itemWidth: 8,
         itemHeight: 8,
-        textStyle: { color: '#8FA0B5', fontSize: 11, fontFamily: 'IBM Plex Mono, monospace' },
+        textStyle: { color: '#7A7468', fontSize: 11, fontFamily: 'IBM Plex Mono, monospace' },
         data: ['结论', '论文'],
       },
     ],
@@ -182,8 +182,8 @@ function buildOption(): echarts.EChartsOption {
         cursor: 'pointer',
         top: 30,
         categories: [
-          { name: '结论', itemStyle: { color: '#3DD6C4' } },
-          { name: '论文', itemStyle: { color: '#E8B04B' } },
+          { name: '结论', itemStyle: { color: '#B8543A' } },
+          { name: '论文', itemStyle: { color: '#5C7A6A' } },
         ],
         force: {
           repulsion: 320,
@@ -196,30 +196,30 @@ function buildOption(): echarts.EChartsOption {
           show: true,
           position: 'right',
           distance: 6,
-          color: '#8FA0B5',
+          color: '#4A453C',
           fontSize: 10.5,
           formatter: (p: any) => (p && p.data ? (p.data as GraphNode).shortName : ''),
         },
         itemStyle: {
-          borderColor: 'rgba(11,15,20,.9)',
+          borderColor: 'rgba(255,255,255,.9)',
           borderWidth: 1.5,
           shadowBlur: 12,
-          shadowColor: 'rgba(61,214,196,.25)',
+          shadowColor: 'rgba(184,84,58,.18)',
         },
         lineStyle: {
-          color: '#33445e',
+          color: '#D8D2C4',
           width: 1,
           curveness: 0.12,
-          opacity: 0.55,
+          opacity: 0.7,
         },
         edgeSymbol: ['none', 'arrow'],
         edgeSymbolSize: 5,
         emphasis: {
           focus: 'adjacency',
           scale: 1.12,
-          label: { color: '#E6EDF6', fontSize: 11.5 },
-          lineStyle: { width: 2, opacity: 0.95, color: '#3DD6C4' },
-          itemStyle: { borderColor: '#3DD6C4', shadowBlur: 22, shadowColor: 'rgba(61,214,196,.55)' },
+          label: { color: '#1A1814', fontSize: 11.5 },
+          lineStyle: { width: 2, opacity: 0.95, color: '#B8543A' },
+          itemStyle: { borderColor: '#B8543A', shadowBlur: 22, shadowColor: 'rgba(184,84,58,.5)' },
         },
         data: nodes,
         links,
@@ -348,7 +348,7 @@ watch(graphData, () => {
   padding: 12px 14px;
   border: 1px solid var(--hair);
   border-radius: var(--radius);
-  background: linear-gradient(180deg, rgba(20, 27, 38, 0.97), rgba(11, 15, 20, 0.97));
+  background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(243,241,234,0.98));
   box-shadow: var(--inner-glow), 0 12px 32px rgba(0, 0, 0, 0.45);
 }
 

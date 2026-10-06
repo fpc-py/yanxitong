@@ -67,7 +67,7 @@ function sourceText(c: Citation): string {
 }
 
 .cite-item:hover {
-  background: rgba(36, 48, 67, 0.28);
+  background: rgba(232, 228, 217, 0.6);
   border-left-color: var(--accent);
 }
 

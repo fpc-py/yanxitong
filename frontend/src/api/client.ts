@@ -8,8 +8,13 @@ import type {
   CitationChainResponse,
   CreateSessionBody,
   HealthResponse,
+  KnowledgeFileItem,
+  KnowledgeUploadResult,
+  MetricsSummary,
   QueryResponse,
+  SessionListItem,
   SessionStatus,
+  SystemCapabilities,
   UploadResponse,
 } from './types'
 
@@ -197,6 +202,52 @@ const api = {
   /** 11. 引用链（结论 → 证据） */
   async getCitationChain(sessionId: string): Promise<CitationChainResponse> {
     const { data } = await http.get<CitationChainResponse>(`/session/${sessionId}/citation-chain`)
+    return data
+  },
+
+  /** 12. 会话列表（历史会话侧栏） */
+  async getSessions(): Promise<SessionListItem[]> {
+    const { data } = await http.get<SessionListItem[]>('/sessions')
+    return data
+  },
+
+  /** 13. 删除会话 */
+  async deleteSession(sessionId: string): Promise<void> {
+    await http.delete(`/session/${sessionId}`)
+  },
+
+  /** 14. 系统能力（沙箱模式 / 六道防线 / 最近 trace） */
+  async getCapabilities(): Promise<SystemCapabilities> {
+    const { data } = await http.get<SystemCapabilities>('/system/capabilities')
+    return data
+  },
+
+  /** 15. 实时指标聚合（进程内 Prometheus 计数器） */
+  async getMetricsSummary(): Promise<MetricsSummary> {
+    const { data } = await http.get<MetricsSummary>('/metrics/summary')
+    return data
+  },
+
+  /** 16. 上传知识库文档（.txt/.md/.pdf，multipart 需显式覆盖 Content-Type） */
+  async uploadKnowledge(file: File): Promise<KnowledgeUploadResult> {
+    const form = new FormData()
+    form.append('file', file)
+    const { data } = await http.post<KnowledgeUploadResult>('/knowledge/upload', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 60_000,
+    })
+    return data
+  },
+
+  /** 17. 知识库文件列表 */
+  async getKnowledgeFiles(): Promise<KnowledgeFileItem[]> {
+    const { data } = await http.get<KnowledgeFileItem[]>('/knowledge/files')
+    return data
+  },
+
+  /** 18. 删除知识库文件 */
+  async deleteKnowledgeFile(name: string): Promise<{ ok: boolean }> {
+    const { data } = await http.delete<{ ok: boolean }>(`/knowledge/file/${encodeURIComponent(name)}`)
     return data
   },
 }

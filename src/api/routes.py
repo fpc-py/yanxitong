@@ -8,10 +8,16 @@ from pathlib import Path
 from src.api.schemas import (
     QueryRequest, AnalyzeRequest, ReviewRequest,
     QueryResponse, SessionStatus, CitationChainResponse, HealthResponse,
-    UploadResponse,
+    UploadResponse, SessionListItem,
+    SystemCapabilities, DefenseItem, MetricsSummary,
+    KnowledgeFileItem, KnowledgeUploadResult,
 )
 from src.workflows.state import create_initial_state
 from src.workflows.supervisor_graph import get_research_app
+from src.workflows import tracing
+from src.knowledge.kb import add_file as kb_add_file, list_files as kb_list_files, remove_file as kb_remove_file, get_kb_store
+from src.tools.sandbox import get_sandbox, DockerSandbox
+from src.observability import metrics as metrics_mod
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +238,162 @@ async def get_citation_chain(session_id: str):
     return CitationChainResponse(session_id=session_id, claims=chain, average_confidence=avg_conf)
 
 
+@router.get("/sessions", response_model=list[SessionListItem])
+async def list_sessions():
+    """按创建时间倒序返回全部会话摘要（最近创建在前）。"""
+    return [_session_summary(sid, st) for sid, st in reversed(list(_sessions.items()))]
+
+
+# ---- 系统能力 / 实时指标 / 知识库 ----
+
+_DEFENSE_LAYERS = [
+    {"key": "rag", "label": "检索增强 (RAG)", "active": True},
+    {"key": "citation", "label": "引用锚定", "active": True},
+    {"key": "kg_factcheck", "label": "知识图谱事实校验", "active": True},
+    {"key": "self_consistency", "label": "自一致性采样", "active": False, "note": "规划中"},
+    {"key": "calibration", "label": "置信度校准", "active": True},
+    {"key": "human_breaker", "label": "人工熔断", "active": True},
+]
+
+
+@router.get("/system/capabilities", response_model=SystemCapabilities)
+async def system_capabilities():
+    """平台可信架构能力：沙箱模式、六道防线激活状态、最近一次链路追踪 ID。"""
+    sandbox = get_sandbox()
+    mode = "docker" if isinstance(sandbox, DockerSandbox) else "mock"
+    return SystemCapabilities(
+        sandbox_mode=mode,
+        defenses=[DefenseItem(**d) for d in _DEFENSE_LAYERS],
+        last_trace_id=tracing.LAST_TRACE_ID,
+        eval_layers=4,
+    )
+
+
+def _by_label(counter, index: int) -> dict[str, float]:
+    """聚合 Counter 中第 index 个 label 维度的总量（保留 >0 项）。"""
+    try:
+        out: dict[str, float] = {}
+        for k, v in (counter._value.get() or {}).items():
+            key = k[index] if isinstance(k, tuple) and len(k) > index else str(k)
+            out[key] = out.get(key, 0.0) + float(v)
+        return {kk: vv for kk, vv in out.items() if vv > 0}
+    except Exception:
+        return {}
+
+
+def _counter_total(counter) -> float:
+    try:
+        vals = counter._value.get() or {}
+        if isinstance(vals, dict):
+            return float(sum(vals.values()))
+        return float(vals)
+    except Exception:
+        return 0.0
+
+
+def _hist_sum(hist) -> float:
+    """Histogram 的 _sum/_count 带 endpoint 标签，跨标签求和。"""
+    try:
+        v = hist._sum.get() if hasattr(hist, "_sum") else 0.0
+        if isinstance(v, dict):
+            return float(sum(v.values()))
+        return float(v)
+    except Exception:
+        return 0.0
+
+
+def _hist_count(hist) -> float:
+    try:
+        v = hist._count.get() if hasattr(hist, "_count") else 0.0
+        if isinstance(v, dict):
+            return float(sum(v.values()))
+        return float(v)
+    except Exception:
+        return 0.0
+
+
+@router.get("/metrics/summary", response_model=MetricsSummary)
+async def metrics_summary():
+    """聚合进程内 Prometheus 计数器为 JSON 摘要（不依赖 Prometheus server）。"""
+    m = metrics_mod
+    token_by_type = _by_label(m.LLM_TOKEN_COUNT, 1)
+    lat_sum = _hist_sum(m.REQUEST_LATENCY)
+    lat_count = _hist_count(m.REQUEST_LATENCY)
+    return MetricsSummary(
+        cost_cents=round(_counter_total(m.LLM_COST), 4),
+        total_tokens=int(_counter_total(m.LLM_TOKEN_COUNT)),
+        prompt_tokens=int(token_by_type.get("prompt", 0)),
+        completion_tokens=int(token_by_type.get("completion", 0)),
+        request_count=int(_counter_total(m.REQUEST_COUNT)),
+        cache_hits=int(_counter_total(m.CACHE_HITS)),
+        cache_misses=int(_counter_total(m.CACHE_MISSES)),
+        hallucination_flags={k: int(v) for k, v in _by_label(m.HALLUCINATION_FLAGS, 0).items()},
+        guard_blocks=int(_counter_total(m.GUARD_BLOCKS)),
+        errors=int(_counter_total(m.ERROR_COUNT)),
+        avg_latency_s=round((lat_sum / lat_count), 2) if lat_count else 0.0,
+    )
+
+
+def _extract_pdf(data: bytes) -> str:
+    try:
+        import io
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(data))
+        return "\n".join((page.extract_text() or "") for page in reader.pages)
+    except Exception:
+        raise HTTPException(status_code=400, detail="PDF 解析库不可用或文件损坏，请改用 .txt / .md")
+
+
+@router.post("/knowledge/upload", response_model=KnowledgeUploadResult)
+async def upload_knowledge(file: UploadFile = File(...)):
+    """上传文档入库（txt/md 直接解析；pdf 需 pypdf），分块嵌入到知识库 FAISS 索引。"""
+    filename = Path(file.filename).name if file.filename else "unnamed"
+    suffix = Path(filename).suffix.lower()
+    if suffix not in (".txt", ".md", ".pdf"):
+        raise HTTPException(status_code=400, detail="仅支持 .txt / .md / .pdf")
+    content = await file.read()
+    if not content or not content.strip():
+        raise HTTPException(status_code=400, detail="文件内容为空")
+    text = content.decode("utf-8", errors="replace") if suffix != ".pdf" else _extract_pdf(content)
+    text = (text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="未能从文件中提取文本")
+    added = kb_add_file(filename, text)
+    if added == 0:
+        raise HTTPException(status_code=400, detail="文本过短，未形成可检索块")
+    return KnowledgeUploadResult(filename=filename, added=added, total_docs=len(get_kb_store()))
+
+
+@router.get("/knowledge/files", response_model=list[KnowledgeFileItem])
+async def list_knowledge_files():
+    return [KnowledgeFileItem(**f) for f in kb_list_files()]
+
+
+@router.delete("/knowledge/file/{filename}")
+async def delete_knowledge_file(filename: str):
+    removed = kb_remove_file(filename)
+    if removed == 0:
+        raise HTTPException(status_code=404, detail=f"知识库中没有 {filename}")
+    return {"ok": True, "removed": removed}
+
+
+@router.delete("/session/{session_id}")
+async def delete_session(session_id: str):
+    """删除会话；不存在时静默返回 ok。"""
+    _sessions.pop(session_id, None)
+    return {"ok": True}
+
+
 # ---- Helpers ----
+
+def _session_summary(session_id: str, state: dict) -> SessionListItem:
+    """与 GET /session/{id} 相同的字段提取逻辑：topic 缺省空串、papers_count 缺省 0。"""
+    return SessionListItem(
+        session_id=session_id,
+        topic=state.get("research_topic", ""),
+        papers_count=len(state.get("literature_results", [])),
+    )
+
 
 def _build_response(session_id: str, result: dict) -> QueryResponse:
     return QueryResponse(session_id=session_id, answer=result.get("final_response","No response generated"), confidence=result.get("confidence_scores",{}).get("supervisor",0.5), citations=result.get("citation_chain",[]), human_review_required=result.get("human_review_required",False), phase=result.get("current_phase","literature"))

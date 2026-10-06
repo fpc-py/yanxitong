@@ -6,6 +6,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from src.workflows.state import ResearchState
+from src.workflows import tracing
 from src.agents.retriever.agent import RetrieverAgent
 from src.agents.kg_builder.agent import KGBuilderAgent
 from src.agents.supervisor.agent import SupervisorAgent
@@ -18,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 
 async def retrieve_node(state: ResearchState) -> ResearchState:
+    # 记录最近一次运行，供 /api/system/capabilities 展示全链路追踪标识
+    tracing.LAST_TRACE_ID = state["session_id"]
     agent = RetrieverAgent()
     result = await agent.execute(state)
     if result.success and result.data:

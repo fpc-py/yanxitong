@@ -1,273 +1,205 @@
 <script setup lang="ts">
-// 工作台概览：会话状态、核心指标、能力清单与快捷入口
-import { computed } from 'vue'
+// 工作台概览：Hero + 指标四卡 + 智能体编排 + 进行中任务 + 知识库 + 系统工程（可观测/成本/评估）
+// 数据全部取自 session / system 两个 store，后端离线时显示占位符且不报错
+import { computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import ConfidenceGauge from '@/components/ConfidenceGauge.vue'
+import KnowledgeBase from '@/components/workbench/KnowledgeBase.vue'
+import MetricsPanel from '@/components/workbench/MetricsPanel.vue'
+import SystemPanels from '@/components/workbench/SystemPanels.vue'
 import { useSessionStore } from '@/stores/session'
+import { useSystemStore } from '@/stores/system'
 
-const store = useSessionStore()
+const session = useSessionStore()
+const system = useSystemStore()
 const router = useRouter()
 
-const PHASE_LABELS: Record<string, string> = {
-  literature: '文献调研',
-  experiment: '实验执行',
-  writing: '论文写作',
-  review: '学术审阅',
-}
+onMounted(() => {
+  system.startPolling() // metrics 15s / capabilities 60s
+  void system.loadKnowledgeFiles()
+})
+onUnmounted(() => system.stopPolling())
 
-const phaseText = computed(() => PHASE_LABELS[store.phase] ?? store.phase ?? '未开始')
-
-const featureList = computed(() => store.health?.features ?? [])
-
-const overallConfidence = computed(() => {
-  const vals = Object.values(store.confidenceScores).map((v) => Number(v)).filter((v) => Number.isFinite(v))
-  if (vals.length) return vals.reduce((a, b) => a + b, 0) / vals.length
-  return store.averageConfidence
+// ---- Hero ----
+const greeting = computed(() => {
+  const h = new Date().getHours()
+  if (h < 12) return '早上好'
+  if (h < 18) return '下午好'
+  return '晚上好'
 })
 
-const entries = [
-  { path: '/chat', title: '会话问答', desc: '创建会话并连续追问，查看引用与置信度', tag: 'DIALOGUE' },
-  { path: '/literature', title: '文献与引用', desc: '文献计数与「结论 → 证据」引用链', tag: 'CITATIONS' },
-  { path: '/kg', title: '知识图谱', desc: '论文与结论的力导向关系图', tag: 'GRAPH' },
-  { path: '/analyze', title: '数据分析', desc: '上传 CSV 并执行数据分析', tag: 'ANALYZE' },
-  { path: '/design', title: '实验设计', desc: '生成假设、变量与统计方法方案', tag: 'DESIGN' },
-  { path: '/write', title: '论文写作', desc: '按章节生成论文草稿', tag: 'WRITE' },
-  { path: '/review', title: '学术审阅', desc: '按引用格式生成审稿报告', tag: 'REVIEW' },
-  { path: '/bibliography', title: '参考文献', desc: 'GB/T 7714、APA、MLA 格式化', tag: 'BIBLIO' },
+// ---- 指标四卡 ----
+const overallConfidence = computed(() => {
+  const vals = Object.values(session.confidenceScores)
+    .map((v) => Number(v))
+    .filter((v) => Number.isFinite(v))
+  if (vals.length) return vals.reduce((a, b) => a + b, 0) / vals.length
+  return session.averageConfidence
+})
+
+const papersText = computed(() => (session.hasSession ? session.papersCount.toLocaleString('zh-CN') : '—'))
+const kgText = computed(() => {
+  const v = session.status?.kg_entities_count
+  return v === undefined || v === null ? '—' : v.toLocaleString('zh-CN')
+})
+const confText = computed(() => (overallConfidence.value > 0 ? overallConfidence.value.toFixed(2) : '—'))
+const costText = computed(() => {
+  const c = system.metrics?.cost_cents
+  if (c === undefined || c === null) return '—'
+  return `¥${(Number.isFinite(c) ? c / 100 : 0).toFixed(2)}`
+})
+
+// ---- 智能体编排 · 7 个执行体 ----
+interface AgentItem {
+  name: string
+  sub: string
+  path: string
+  letter: string
+  tone: 'ink' | 'blue' | 'purple' | 'accent' | 'green' | 'amber' | 'red'
+  key: string
+}
+
+const agents: AgentItem[] = [
+  { name: 'Supervisor 总控', sub: '意图路由', path: '/chat', letter: 'S', tone: 'ink', key: 'supervisor' },
+  { name: 'Retriever 文献侦察', sub: '文献检索', path: '/literature', letter: 'R', tone: 'blue', key: 'retriever' },
+  { name: 'KG Builder 图谱构建', sub: '实体关系抽取', path: '/kg', letter: 'K', tone: 'purple', key: 'kg_builder' },
+  { name: 'Data Analyst 数据挖掘', sub: 'Docker 沙箱', path: '/analyze', letter: 'D', tone: 'accent', key: 'data_analyst' },
+  { name: 'Experiment Designer 实验设计', sub: '方案优化', path: '/design', letter: 'E', tone: 'green', key: 'experiment_designer' },
+  { name: 'Writing Assistant 论文写作', sub: '章节生成', path: '/write', letter: 'W', tone: 'amber', key: 'writing_assistant' },
+  { name: 'Academic Reviewer 学术审阅', sub: '规范审查', path: '/review', letter: 'V', tone: 'red', key: 'academic_reviewer' },
 ]
 
-async function refresh(): Promise<void> {
-  await Promise.all([store.refreshHealth(), store.refreshStatus(), store.loadCitationChain()])
+// 状态徽标：运行中 > 有置信度评分 > 就绪（诚实，不编造）
+function agentStatus(key: string): { text: string; cls: 'idle' | 'busy' | 'ready' } {
+  if (session.loading) return { text: '运行中', cls: 'busy' }
+  const v = Number(session.confidenceScores[key])
+  if (Number.isFinite(v) && v > 0) return { text: `${Math.round(v * 100)}%`, cls: 'ready' }
+  return { text: '就绪', cls: 'idle' }
+}
+
+const agentCards = computed(() => agents.map((a) => ({ ...a, status: agentStatus(a.key) })))
+
+async function openAgent(path: string): Promise<void> {
+  await router.push(path)
+}
+
+// ---- 进行中任务（真实后端会话列表） ----
+async function openSession(id: string): Promise<void> {
+  await session.switchSession(id)
+  await router.push('/chat')
+}
+
+function refresh(): void {
+  void session.refreshHealth()
+  void session.refreshStatus()
+  void session.loadCitationChain()
+  void system.loadCapabilities()
+  void system.loadMetrics()
+  void system.loadKnowledgeFiles()
 }
 </script>
 
 <template>
   <div class="page overview">
-    <header class="page-head">
-      <div>
-        <span class="eyebrow page-kicker">WORKBENCH / OVERVIEW</span>
-        <h1 class="page-title">科研工作台</h1>
-        <p class="page-desc">
-          面向高校科研全生命周期的多智能体工作台：文献检索、知识图谱、数据分析、实验设计、论文写作与学术审阅在同一会话内串联。
-        </p>
-      </div>
-      <div class="page-actions">
-        <el-button size="small" :loading="store.loading" @click="refresh">刷新状态</el-button>
-        <el-button v-if="!store.hasSession" type="primary" size="small" @click="router.push('/chat')">建立会话</el-button>
-      </div>
-    </header>
-
     <div class="stagger stack">
-      <!-- 指标条 -->
-      <div class="grid grid-3">
-        <div class="stat">
-          <span class="stat-label">文献数量</span>
-          <span class="stat-value">{{ store.papersCount }}</span>
-          <span class="stat-hint">来自会话检索结果</span>
+      <div class="v-label">工作台 · Overview</div>
+
+      <!-- Hero -->
+      <header class="wb-hero">
+        <div class="wb-hero-text">
+          <h1 class="wb-title serif">{{ greeting }}，<em>研究员</em></h1>
+          <p class="wb-sub">以文献库与实验记录为知识底座，覆盖「找→读→算→写→审」全链路。</p>
         </div>
-        <div class="stat">
-          <span class="stat-label">引用链结论</span>
-          <span class="stat-value">{{ store.claims.length }}</span>
-          <span class="stat-hint">结论 → 证据 条目数</span>
+        <div class="wb-hero-actions">
+          <el-button size="small" :loading="session.loading" @click="refresh">刷新状态</el-button>
         </div>
-        <div class="stat">
-          <span class="stat-label">当前阶段</span>
-          <span class="stat-value" style="font-size: 20px">{{ phaseText }}</span>
-          <span class="stat-hint">{{ store.hasSession ? `会话 ${store.sessionId}` : '尚未建立会话' }}</span>
-        </div>
+      </header>
+
+      <!-- 指标四卡 -->
+      <div class="ov-metrics">
+        <article class="ov-metric">
+          <span class="ov-metric-label mono">文献已索引</span>
+          <span class="ov-metric-value serif">{{ papersText }}</span>
+          <span class="ov-metric-sub">当前会话</span>
+        </article>
+        <article class="ov-metric">
+          <span class="ov-metric-label mono">KG 实体数</span>
+          <span class="ov-metric-value serif">{{ kgText }}</span>
+          <span class="ov-metric-sub">知识图谱实体</span>
+        </article>
+        <article class="ov-metric">
+          <span class="ov-metric-label mono">平均置信度</span>
+          <span class="ov-metric-value serif">{{ confText }}</span>
+          <span class="ov-metric-sub">引用链 {{ session.claims.length }} 条</span>
+        </article>
+        <article class="ov-metric">
+          <span class="ov-metric-label mono">累计 Token 成本</span>
+          <span class="ov-metric-value serif">{{ costText }}</span>
+          <span class="ov-metric-sub">实时聚合</span>
+        </article>
       </div>
 
-      <div class="grid grid-main-side">
-        <!-- 能力清单 -->
-        <section class="panel">
-          <header class="panel-head">
-            <span class="panel-title serif">后端能力</span>
-            <span class="panel-sub">{{ store.health?.features.length ?? 0 }} FEATURES</span>
-          </header>
-          <div class="panel-body">
-            <div v-if="featureList.length" class="feat-grid">
-              <div v-for="f in featureList" :key="f" class="feat">
-                <span class="dot is-ok" />
-                <span class="mono feat-name">{{ f }}</span>
-              </div>
-            </div>
-            <div v-else class="empty">
-              <span class="empty-icon mono">◌</span>
-              <span>尚未获取后端能力清单，请确认后端已启动</span>
-            </div>
-          </div>
-        </section>
+      <!-- 智能体编排 -->
+      <section class="wb-section">
+        <div class="wb-section-head">
+          <span class="eyebrow wb-section-kicker">AGENT ORCHESTRATION</span>
+          <h2 class="wb-section-title serif">智能体编排 · 7 个执行体</h2>
+          <span class="wb-section-hint">点击卡片进入对应工作流</span>
+        </div>
 
-        <!-- 置信度 + 会话状态 -->
-        <section class="panel">
-          <header class="panel-head">
-            <span class="panel-title serif">会话状态</span>
-          </header>
-          <div class="panel-body">
-            <div class="gauge-wrap">
-              <ConfidenceGauge :value="overallConfidence" label="综合置信度" sublabel="SESSION CONFIDENCE" :size="168" />
-            </div>
-            <dl class="meta">
-              <div><dt>会话 ID</dt><dd class="mono">{{ store.sessionId || '—' }}</dd></div>
-              <div><dt>研究主题</dt><dd>{{ store.topic || '—' }}</dd></div>
-              <div><dt>人工复核</dt><dd :class="store.humanReviewRequired ? 'text-amber' : 'text-accent'">{{ store.humanReviewRequired ? '需要' : '不需要' }}</dd></div>
-              <div><dt>数据文件</dt><dd class="mono">{{ store.status?.has_data_file ? '已上传' : '未上传' }}</dd></div>
-              <div><dt>论文草稿</dt><dd class="mono">{{ store.status?.has_draft ? '已生成' : '未生成' }}</dd></div>
-              <div><dt>最近耗时</dt><dd class="mono">{{ store.lastLatencyMs === null ? '—' : (store.lastLatencyMs / 1000).toFixed(1) + 's' }}</dd></div>
-            </dl>
-          </div>
-        </section>
-      </div>
+        <div class="ov-agents">
+          <button v-for="a in agentCards" :key="a.key" class="ov-agent" type="button" @click="openAgent(a.path)">
+            <span class="ov-av" :class="`is-${a.tone}`">{{ a.letter }}</span>
+            <span class="ov-agent-text">
+              <span class="ov-agent-name">{{ a.name }}</span>
+              <span class="ov-agent-sub mono">{{ a.sub }}</span>
+            </span>
+            <span class="ov-st" :class="a.status.cls">{{ a.status.text }}</span>
+          </button>
+        </div>
+      </section>
 
-      <!-- 快捷入口 -->
-      <div class="grid grid-2 entry-grid">
-        <router-link v-for="e in entries" :key="e.path" :to="e.path" class="entry">
-          <span class="entry-tag mono">{{ e.tag }}</span>
-          <span class="entry-title">{{ e.title }}</span>
-          <span class="entry-desc">{{ e.desc }}</span>
-          <span class="entry-arrow mono">→</span>
-        </router-link>
-      </div>
+      <!-- 进行中任务 -->
+      <section class="wb-section">
+        <div class="wb-section-head">
+          <span class="eyebrow wb-section-kicker">ACTIVE SESSIONS</span>
+          <h2 class="wb-section-title serif">进行中任务</h2>
+          <span class="wb-section-hint">共 {{ session.sessionList.length }} 条 · 来自后端会话列表</span>
+        </div>
+
+        <div v-if="session.sessionList.length" class="ov-tasks">
+          <button
+            v-for="t in session.sessionList"
+            :key="t.session_id"
+            class="ov-task"
+            type="button"
+            @click="openSession(t.session_id)"
+          >
+            <span class="ov-task-body">
+              <span class="ov-task-name">{{ t.topic || '未命名会话' }}</span>
+              <span class="ov-task-sub mono">{{ t.papers_count }} 篇文献</span>
+            </span>
+            <span class="ov-st" :class="t.session_id === session.sessionId ? 'busy' : 'ready'">
+              {{ t.session_id === session.sessionId ? '当前' : '进行中' }}
+            </span>
+          </button>
+        </div>
+        <div v-else class="ov-empty">暂无研究任务 · 点击左侧「新研究任务」开始</div>
+      </section>
+
+      <!-- 知识库 -->
+      <KnowledgeBase />
+
+      <!-- 系统工程 · 可观测（整合可观测性 / 成本看板 / 评估中心） -->
+      <section class="wb-section">
+        <div class="wb-section-head">
+          <span class="eyebrow wb-section-kicker">SYSTEM ENGINEERING</span>
+          <h2 class="wb-section-title serif">系统工程 · 可观测</h2>
+          <span class="wb-section-hint">防线 · 成本 · 评估的真实运行状态</span>
+        </div>
+
+        <MetricsPanel />
+        <SystemPanels />
+      </section>
     </div>
   </div>
 </template>
-
-<style scoped>
-.gauge-wrap {
-  display: flex;
-  justify-content: center;
-  padding: 4px 0 16px;
-  border-bottom: 1px solid var(--hair-soft);
-  margin-bottom: 14px;
-}
-
-.feat-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-  gap: 9px;
-}
-
-.feat {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 11px;
-  border: 1px solid var(--hair-soft);
-  border-radius: var(--radius-sm);
-  background: rgba(26, 35, 49, 0.3);
-  transition: border-color 0.2s var(--ease), background 0.2s var(--ease);
-}
-
-.feat:hover {
-  border-color: var(--accent-line);
-  background: var(--accent-soft);
-}
-
-.feat-name {
-  font-size: 11.5px;
-  color: var(--text-2);
-  letter-spacing: 0.02em;
-}
-
-.meta {
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
-
-.meta > div {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.meta dt {
-  font-size: 12px;
-  color: var(--text-3);
-}
-
-.meta dd {
-  margin: 0;
-  font-size: 12px;
-  color: var(--text-1);
-  text-align: right;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 200px;
-}
-
-.entry-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.entry {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 15px 18px;
-  border: 1px solid var(--hair);
-  border-radius: var(--radius);
-  background: linear-gradient(180deg, rgba(20, 27, 38, 0.8), rgba(14, 20, 32, 0.66));
-  text-decoration: none;
-  overflow: hidden;
-  transition: border-color 0.22s var(--ease), transform 0.22s var(--ease), background 0.22s var(--ease);
-}
-
-.entry::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background: var(--accent);
-  transform: scaleY(0);
-  transform-origin: top;
-  transition: transform 0.26s var(--ease);
-}
-
-.entry:hover {
-  border-color: var(--accent-line);
-  transform: translateX(2px);
-  background: linear-gradient(180deg, rgba(24, 33, 46, 0.9), rgba(14, 20, 32, 0.7));
-}
-
-.entry:hover::before {
-  transform: scaleY(1);
-}
-
-.entry-tag {
-  font-size: 9.5px;
-  letter-spacing: 0.14em;
-  color: var(--text-3);
-}
-
-.entry-title {
-  font-family: var(--font-display);
-  font-size: 16px;
-  color: var(--text-1);
-}
-
-.entry-desc {
-  font-size: 12px;
-  color: var(--text-2);
-  line-height: 1.55;
-}
-
-.entry-arrow {
-  position: absolute;
-  right: 16px;
-  top: 15px;
-  color: var(--text-3);
-  transition: color 0.2s var(--ease), transform 0.2s var(--ease);
-}
-
-.entry:hover .entry-arrow {
-  color: var(--accent);
-  transform: translateX(3px);
-}
-</style>

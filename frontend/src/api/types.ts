@@ -71,6 +71,13 @@ export interface SessionStatus {
   has_draft: boolean
 }
 
+/** 会话列表项（历史会话侧栏） */
+export interface SessionListItem {
+  session_id: string
+  topic: string
+  papers_count: number
+}
+
 /** 引用链响应 */
 export interface CitationChainResponse {
   session_id: string
@@ -91,4 +98,51 @@ export interface CreateSessionBody {
   query: string
   topic: string
   session_id?: string
+}
+
+/** 六道防线中的一道 */
+export interface DefenseItem {
+  key: string
+  label: string
+  active: boolean
+  note: string
+}
+
+/** 系统能力：沙箱模式 / 防线状态 / 最近追踪 / 评估层数 */
+export interface SystemCapabilities {
+  sandbox_mode: 'docker' | 'mock'
+  defenses: DefenseItem[]
+  last_trace_id: string | null
+  eval_layers: number
+}
+
+/** 实时指标聚合（进程内 Prometheus 计数器） */
+export interface MetricsSummary {
+  cost_cents: number
+  total_tokens: number
+  prompt_tokens: number
+  completion_tokens: number
+  request_count: number
+  cache_hits: number
+  cache_misses: number
+  hallucination_flags: Record<string, number>
+  guard_blocks: number
+  errors: number
+  avg_latency_s: number
+}
+
+/** 知识库文件条目 */
+export interface KnowledgeFileItem {
+  filename: string
+  chunks: number
+  chars: number
+  updated_at: string
+  preview: string
+}
+
+/** 知识库上传结果 */
+export interface KnowledgeUploadResult {
+  filename: string
+  added: number
+  total_docs: number
 }
