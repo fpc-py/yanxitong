@@ -81,6 +81,8 @@ kb:
   ner_max_chunks: 5              # 每篇上传文档抽实体所用的前置块数
 
 # --- Knowledge graph construction -------------------------------------------------
+# entity_types / relation_types 是封闭 schema 的唯一权威来源：
+# 抽取提示词由它们生成，写入前代码级 gate 也会丢弃白名单外的类型。
 kg:
   entity_types:
     - ResearchProblem
@@ -92,17 +94,26 @@ kg:
     - Author
     - Venue
   relation_types:
+    - PROPOSES
     - USES_DATASET
     - USES_METRIC
-    - BASED_ON
-    - PROPOSES
     - EVALUATED_ON
     - OUTPERFORMS
+    - IMPROVES_ON
+    - BASED_ON
+    - EXTENDS
+    - COMPARES_WITH
     - APPLIED_TO
     - CITES
-    - EXTENDS
     - CONTRADICTS
   max_entities_per_doc: 60
+  max_papers: 25                  # LLM 关系补充上限（确定性边不受此限制）
+  concurrency: 5
+  build_enabled: true             # 总开关：关闭后所有图谱写入跳过（回滚杠杆）
+  llm_relation_pass: true         # LLM 补充实体间关系；确定性边始终生成
+  hops: 2                         # GraphRAG 邻域展开深度
+  context_chars: 1800             # 融合上下文中图谱段字符预算
+  review_sample_rate: 0.1         # 按 edge_key 确定性抽取人工复核的比例
 
 # --- Sandboxed code execution (data analyst agent) ---------------------------------
 sandbox:

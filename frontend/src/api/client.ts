@@ -11,6 +11,17 @@ import type {
   CitationChainResponse,
   CreateSessionBody,
   HealthResponse,
+  KgAuditEntry,
+  KgBackfillResult,
+  KgEntitySearchResponse,
+  KgEvidencePathResponse,
+  KgGraphData,
+  KgHallucinationFlag,
+  KgOverview,
+  KgPaperDetail,
+  KgReviewQueueResponse,
+  KgRoadmapResponse,
+  KgTraceResponse,
   KnowledgeFileItem,
   KnowledgeUploadResult,
   LiteratureConflictsResponse,
@@ -347,6 +358,107 @@ const api = {
   /** 22. 当前身份：已登录返回 user，未登录返回匿名配额 */
   async getMe(): Promise<MeResponse> {
     const { data } = await http.get<MeResponse>('/auth/me')
+    return data
+  },
+
+  // ---------- 知识图谱（/api/kg/*，全部端点在图不可用时返回 degraded 降级结构） ----------
+
+  /** 23. 图谱总览：计数 + 封闭 schema（实体/关系白名单） */
+  async getKgOverview(): Promise<KgOverview> {
+    const { data } = await http.get<KgOverview>('/kg/overview')
+    return data
+  },
+
+  /** 24. 实体检索（scope=会话 id 时限定会话视图，缺省全图共享复用） */
+  async searchKgEntities(q: string, limit = 20, type?: string, scope?: string): Promise<KgEntitySearchResponse> {
+    const { data } = await http.get<KgEntitySearchResponse>('/kg/entities/search', {
+      params: { q, limit, type: type || undefined, scope: scope || undefined },
+    })
+    return data
+  },
+
+  /** 25. 实体邻域（1-3 跳子图） */
+  async getKgNeighbors(entityId: string, depth = 1): Promise<KgGraphData> {
+    const { data } = await http.get<KgGraphData>(`/kg/entity/${encodeURIComponent(entityId)}/neighbors`, {
+      params: { depth },
+    })
+    return data
+  },
+
+  /** 26. 论文节点详情（paper_id 形如 ax:/th:/url:） */
+  async getKgPaper(paperId: string): Promise<KgPaperDetail> {
+    const { data } = await http.get<KgPaperDetail>(`/kg/papers/${encodeURIComponent(paperId)}`)
+    return data
+  },
+
+  /** 27. 会话视图子图（(:Session)-[:RETRIEVED]->(:Paper) + 直接相连实体） */
+  async getKgSessionSubgraph(sessionId: string, limit = 300): Promise<KgGraphData> {
+    const { data } = await http.get<KgGraphData>(`/kg/session/${sessionId}/subgraph`, { params: { limit } })
+    return data
+  },
+
+  /** 28. 可解释证据链：节点 → 带原文引文的边 → 对端论文 */
+  async getKgEvidencePath(target: string, limit = 30): Promise<KgEvidencePathResponse> {
+    const { data } = await http.get<KgEvidencePathResponse>('/kg/evidence-path', {
+      params: { target, limit },
+    })
+    return data
+  },
+
+  /** 29. 人工复核队列 */
+  async getKgReviewQueue(limit = 50): Promise<KgReviewQueueResponse> {
+    const { data } = await http.get<KgReviewQueueResponse>('/kg/review-queue', { params: { limit } })
+    return data
+  },
+
+  /** 30. 复核判定：approved 保留边 / rejected 删边 */
+  async markKgReviewed(edgeKey: string, decision: 'approved' | 'rejected', note = ''): Promise<{ ok: boolean }> {
+    const { data } = await http.post<{ ok: boolean }>(`/kg/review/${encodeURIComponent(edgeKey)}`, {
+      decision,
+      note,
+    })
+    return data
+  },
+
+  /** 31. 研究路线图（时间线 / 演进链 / 矛盾 / 空白） */
+  async getKgRoadmap(sessionId?: string): Promise<KgRoadmapResponse> {
+    const { data } = await http.get<KgRoadmapResponse>('/kg/roadmap', {
+      params: { session_id: sessionId || undefined },
+    })
+    return data
+  },
+
+  /** 32. 研究空白候选（低度数实体） */
+  async getKgGaps(scope?: string, limit = 20): Promise<{ count: number; gaps: { entity_id: string; name: string; type: string; degree: number }[] }> {
+    const { data } = await http.get('/kg/gaps', { params: { scope: scope || undefined, limit } })
+    return data
+  },
+
+  /** 33. 幻觉标记审计（三元组冲突 + 质量门禁升级） */
+  async getKgHallucinationFlags(sessionId = '', limit = 100): Promise<{ flags: KgHallucinationFlag[] }> {
+    const { data } = await http.get<{ flags: KgHallucinationFlag[] }>('/kg/hallucination-flags', {
+      params: { session_id: sessionId, limit },
+    })
+    return data
+  },
+
+  /** 34. 审计日志（建图统计、复核操作等关键事件） */
+  async getKgAudit(sessionId = '', limit = 200): Promise<{ entries: KgAuditEntry[] }> {
+    const { data } = await http.get<{ entries: KgAuditEntry[] }>('/kg/audit', {
+      params: { session_id: sessionId, limit },
+    })
+    return data
+  },
+
+  /** 35. 推理轨迹面板（agent span + 幻觉标记 + 审计） */
+  async getKgTrace(sessionId: string, limit = 500): Promise<KgTraceResponse> {
+    const { data } = await http.get<KgTraceResponse>(`/kg/trace/${sessionId}`, { params: { limit } })
+    return data
+  },
+
+  /** 36. 从历史会话重建图谱（确定性通道，幂等） */
+  async kgBackfill(): Promise<KgBackfillResult> {
+    const { data } = await http.post<KgBackfillResult>('/kg/backfill')
     return data
   },
 }

@@ -91,12 +91,21 @@ class SupervisorAgent(BaseAgent):
         answer = await self._call_llm(QA_PROMPT.format(context=ctx[:8000], query=query))
         self._audit("answer_generated", {"length": len(answer)})
 
+        # ---- 三元组反查（规格③核心）: (方法,数据集,指标) → 知识图谱 --------
+        triple_report = None
+        try:
+            from src.safety.triple_check import get_triple_verifier
+
+            triple_report = await get_triple_verifier().verify_answer(answer)
+        except Exception as e:
+            logger.warning("Triple check degraded: %s", e)
+
         # ---- Phase 4: Six-layer hallucination defense quality gate ----
         defense_report = None
         try:
             defense = get_hallucination_defense()
             kg_entities = rag.get("kg_entities", [])
-            defense_report = await defense.evaluate(answer, evidence_docs, kg_entities)
+            defense_report = await defense.evaluate(answer, evidence_docs, kg_entities, triple_report=triple_report)
             confidence = defense_report.overall_confidence
             hr = defense_report.requires_human_review
             risk = defense_report.risk_level
@@ -113,6 +122,21 @@ class SupervisorAgent(BaseAgent):
             if risk in ("high", "critical"):
                 answer = f"⚠️ [风险等级: {risk}] 以下回答需要人工审核:\n\n{answer}"
                 hr = True
+
+            # 落库：指标 + 审计存储（推理轨迹/幻觉标记面板的数据源）
+            from src.observability.metrics import track_hallucination_flag
+            from src.observability.audit_store import record_hallucination_flag
+
+            sid = state.get("session_id", "")
+            for flag in (triple_report or {}).get("flags", [])[:5]:
+                track_hallucination_flag("triple_check", flag.get("state", "unknown"))
+                record_hallucination_flag(sid, "triple_check", flag.get("state", "unknown"), flag)
+            if risk in ("high", "critical"):
+                track_hallucination_flag("hallucination_defense", risk)
+                record_hallucination_flag(sid, "hallucination_defense", risk, {
+                    "summary": defense_report.summary,
+                    "flagged_claims": defense_report.flagged_claims[:5],
+                })
 
         except Exception as e:
             logger.warning("Hallucination defense degraded: %s", e)
@@ -132,6 +156,7 @@ class SupervisorAgent(BaseAgent):
             "human_review_required": hr,
             "risk_level": risk,
             "citation_chain": chain.to_dict(),
+            "triple_report": triple_report,
             "quality_report": {
                 "overall_confidence": confidence,
                 "risk_level": risk,

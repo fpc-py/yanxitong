@@ -267,3 +267,196 @@ export interface MeResponse {
   user: UserInfo | null
   quota: QuotaInfo | null
 }
+
+// ---- 知识图谱（对齐 /api/kg/* 端点） ----
+
+/** 图谱节点（子图 / 邻域 / 检索通用；paper_id 为 ax:/th:/url: 格式） */
+export interface KgNode {
+  id: string
+  name: string
+  type?: string
+  kind?: string
+  year?: number | string
+  arxiv_id?: string
+  degree?: number
+  [key: string]: unknown
+}
+
+/** 图谱边（evidence 为写入时校验过的原文引文） */
+export interface KgEdge {
+  source: string
+  target: string
+  type: string
+  evidence?: string | null
+  evidence_source?: string | null
+  value?: unknown
+  properties?: Record<string, unknown>
+}
+
+/** 子图 / 邻域响应（degraded=true 表示图谱不可用降级） */
+export interface KgGraphData {
+  nodes: KgNode[]
+  edges: KgEdge[]
+  paths?: { edges: KgEdge[] }[]
+  degraded?: boolean
+  [key: string]: unknown
+}
+
+/** 图谱总览（schema 为封闭白名单，配置唯一权威） */
+export interface KgOverview {
+  papers: number
+  sessions: number
+  entities: Record<string, number>
+  entities_total: number
+  relations: Record<string, number>
+  relations_total: number
+  pending_review: number
+  schema: { entity_types: string[]; relation_types: string[] }
+  degraded?: boolean
+}
+
+/** 实体检索响应 */
+export interface KgEntitySearchResponse {
+  query: string
+  count: number
+  entities: KgNode[]
+  degraded?: boolean
+}
+
+/** 论文节点详情（含直接相连实体） */
+export interface KgPaperDetail {
+  paper_id?: string
+  title?: string
+  year?: number | string
+  authors?: string | string[]
+  arxiv_id?: string
+  venue?: string
+  abstract?: string
+  entities?: KgNode[]
+  [key: string]: unknown
+}
+
+/** 证据链条目：节点 → 带原文引文的边 → 对端论文 */
+export interface KgEvidenceRow {
+  paper_id: string
+  paper_title: string
+  arxiv_id: string
+  entity_id: string
+  entity_name: string
+  entity_type: string
+  relation: string
+  evidence: string
+  evidence_source: string
+  value: string
+  sessions: string[]
+}
+
+export interface KgEvidencePathResponse {
+  target: string
+  count: number
+  path: KgEvidenceRow[]
+  degraded?: boolean
+}
+
+/** 人工复核队列条目（抽样 + 引文校验失败强制入队） */
+export interface KgReviewItem {
+  edge_key: string
+  rel: string
+  source_id: string
+  source_name: string
+  target_id: string
+  target_name: string
+  evidence: string | null
+  evidence_source: string | null
+  sessions: string[] | null
+  source_abstract?: string
+  created_at?: number
+}
+
+export interface KgReviewQueueResponse {
+  count: number
+  queue: KgReviewItem[]
+  degraded?: boolean
+}
+
+/** 研究路线图（时间线 / 演进链 / 矛盾 / 空白） */
+export interface KgTimelineItem {
+  year: number
+  paper_count: number
+  papers: { paper_id: string; title: string; arxiv_id?: string; methods: string[] }[]
+}
+
+export interface KgEvolutionItem {
+  year: number
+  nodes: string[]
+  relations: string[]
+  text: string
+  evidence: string[]
+}
+
+export interface KgContradiction {
+  source: string
+  target: string
+  evidence?: string | null
+  evidence_source?: string | null
+}
+
+export interface KgRoadmapResponse {
+  timeline: KgTimelineItem[]
+  evolution: KgEvolutionItem[]
+  contradictions: KgContradiction[]
+  gaps: { entity_id: string; name: string; type: string; degree: number }[]
+  degraded?: boolean
+}
+
+/** 幻觉标记（三元组冲突 / 质量门禁升级） */
+export interface KgHallucinationFlag {
+  id?: number
+  session_id: string
+  layer: string
+  risk_level: string
+  detail?: Record<string, unknown> | null
+  created_at?: number
+}
+
+/** 审计日志条目 */
+export interface KgAuditEntry {
+  id?: number
+  session_id: string
+  agent: string
+  action: string
+  detail?: Record<string, unknown> | null
+  trace_id?: string
+  created_at?: number
+}
+
+/** 推理轨迹（agent span + 幻觉标记 + 审计事件） */
+export interface KgTraceSpan {
+  id?: number
+  session_id: string
+  agent: string
+  status: string
+  duration_ms?: number
+  trace_id?: string
+  detail?: Record<string, unknown> | null
+  created_at?: number
+}
+
+export interface KgTraceResponse {
+  session_id: string
+  traces: KgTraceSpan[]
+  flags: KgHallucinationFlag[]
+  audit: KgAuditEntry[]
+}
+
+/** 图谱回填结果 */
+export interface KgBackfillResult {
+  sessions: number
+  papers: number
+  entities: number
+  edges: number
+  unique_papers: number
+  degraded: boolean
+  error?: string
+  errors?: string[]
+}

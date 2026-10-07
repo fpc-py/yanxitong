@@ -1,5 +1,6 @@
 # Workflow definitions v3.0 — supervisor graph with full 5-link chain: find→read→compute→write→review.
 
+import asyncio
 import logging
 from typing import Literal
 from langgraph.graph import StateGraph, END
@@ -42,6 +43,38 @@ async def kg_build_node(state: ResearchState) -> ResearchState:
     result = await agent.execute(state)
     if result.success:
         state["confidence_scores"]["kg_builder"] = result.confidence
+        stats = dict(result.data or {})
+        # 建图后重算会话视图内的稀疏实体（研究空白候选），供洞察展示
+        try:
+            from src.knowledge.graph_store import get_graph_store
+            gs = await get_graph_store()
+            stats["sparse_entities"] = (await gs.find_sparse_entities(
+                scope=state.get("session_id") or None, limit=10
+            ))[:5]
+        except Exception as e:
+            logger.warning("Sparse entity query degraded: %s", e)
+        state["kg_stats"] = stats
+        # 审计日志（推理轨迹/审计面板数据源）：建图统计一次性落库
+        try:
+            from src.observability.audit_store import record_audit
+
+            record_audit(
+                state.get("session_id", ""),
+                "kg_builder",
+                "build_complete",
+                {k: stats.get(k) for k in ("papers", "entities", "relations", "dropped", "degraded")},
+            )
+        except Exception as e:
+            logger.debug("Audit write degraded: %s", e)
+        # 规格⑤：建图后产出路线图洞察（时间线/演进链/矛盾/空白），写回 state
+        try:
+            from src.analysis.roadmap import RoadmapBuilder
+
+            state["research_roadmap"] = await asyncio.wait_for(
+                RoadmapBuilder().build(scope=state.get("session_id") or None), timeout=6
+            )
+        except Exception as e:
+            logger.warning("Roadmap degraded: %s", e)
     else:
         logger.warning("KG Builder degraded: %s", result.error)
     return state
@@ -56,6 +89,8 @@ async def supervisor_node(state: ResearchState) -> ResearchState:
         state["human_review_required"] = result.data.get("human_review_required", False)
         if "citation_chain" in result.data:
             state["citation_chain"] = result.data["citation_chain"].get("claims", [])
+        if "triple_report" in result.data:
+            state["triple_report"] = result.data["triple_report"]
     else:
         state["error_message"] = result.error
         state["final_response"] = f"Error: {result.error}"

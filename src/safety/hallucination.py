@@ -54,7 +54,7 @@ class HallucinationDefense:
     def __init__(self):
         self.settings = get_settings()
 
-    async def evaluate(self, response: str, source_docs: list[dict], kg_facts: list[dict], alternative_samples: list[str] = None) -> HallucinationReport:
+    async def evaluate(self, response: str, source_docs: list[dict], kg_facts: list[dict], alternative_samples: list[str] = None, *, triple_report: Optional[dict] = None) -> HallucinationReport:
         layers = {}
         flagged = []
 
@@ -64,7 +64,7 @@ class HallucinationDefense:
         s2, d2 = self._check_citation_anchoring(response, source_docs)
         layers["citation_anchoring"] = LayerResult(name="引用锚定", score=s2, passed=s2 >= 0.5, details=d2)
 
-        s3, d3 = await self._verify_against_kg(response, kg_facts)
+        s3, d3 = await self._verify_against_kg(response, kg_facts, triple_report)
         layers["kg_verification"] = LayerResult(name="知识图谱反验", score=s3, passed=s3 >= 0.4, details=d3)
 
         s4, d4 = self._check_self_consistency(response, alternative_samples)
@@ -83,6 +83,18 @@ class HallucinationDefense:
             if not layer.passed and layer.score < 0.6:
                 flagged.append({"layer": name, "score": layer.score, "details": layer.details})
 
+        # 三元组反查的硬冲突（contradicted / numeric_conflict）直接升级为高风险
+        hard_conflicts = [
+            t for t in (triple_report or {}).get("flags", [])
+            if t.get("state") in ("contradicted", "numeric_conflict")
+        ]
+        for item in hard_conflicts[:10]:
+            flagged.append({
+                "layer": "kg_verification",
+                "score": item.get("score", 0.0),
+                "details": f"{item.get('method')}/{item.get('dataset')}/{item.get('metric')}: {item.get('reason', '')}",
+            })
+
         if not l6_passed:
             risk_level = "critical"
         elif overall < 0.3:
@@ -93,8 +105,12 @@ class HallucinationDefense:
             risk_level = "low"
         else:
             risk_level = "none"
+        if hard_conflicts and risk_level in ("none", "low", "medium"):
+            risk_level = "high"
 
         requires_review = not l6_passed or overall < self.settings.safety.confidence_threshold
+        if hard_conflicts:
+            requires_review = True
 
         return HallucinationReport(
             overall_confidence=overall,
@@ -137,7 +153,20 @@ class HallucinationDefense:
         score = min(1.0, total / expected) if expected > 0 else 0.5
         return score, f"Found {total} citations for ~{len(claims)} claims"
 
-    async def _verify_against_kg(self, response: str, kg_facts: list[dict]) -> tuple[float, str]:
+    async def _verify_against_kg(self, response: str, kg_facts: list[dict], triple_report: Optional[dict] = None) -> tuple[float, str]:
+        # 三元组反查优先：LLM 抽取的 (方法, 数据集, 指标) 已在图谱中反向验证过，
+        # 比实体名子串匹配强得多；无三元组时退回名称匹配。
+        report = triple_report or {}
+        if report.get("checked") and not report.get("degraded"):
+            states = report.get("states") or {}
+            detail = "三元组反查 %d 条: %s" % (
+                report["checked"],
+                ", ".join(f"{k}={v}" for k, v in sorted(states.items())),
+            )
+            hard = states.get("contradicted", 0) + states.get("numeric_conflict", 0)
+            if hard:
+                detail += f"；{hard} 条与图谱冲突"
+            return float(report.get("score", 0.5)), detail
         if not kg_facts:
             return 0.5, "知识图谱不可用"
         rl = response.lower()

@@ -237,7 +237,28 @@ class BaseAgent(ABC):
             logger.exception("Agent %s failed: %s", self.name, exc)
             result = AgentResult(success=False, error=str(exc), confidence=0.0)
         result.execution_time_ms = (time.perf_counter() - start) * 1000.0
+        self._record_span(state, result, trace_id)
         return result
+
+    def _record_span(self, state: dict[str, Any], result: AgentResult, trace_id: str) -> None:
+        """One observability span per execution: metrics + SQLite audit trace."""
+        try:
+            from src.observability.metrics import track_agent_call
+            from src.observability.audit_store import record_trace
+
+            status = "success" if result.success else "failed"
+            session_id = str((state or {}).get("session_id") or "")
+            track_agent_call(self.name, status, result.execution_time_ms / 1000.0)
+            record_trace(
+                session_id,
+                self.name,
+                status,
+                result.execution_time_ms,
+                trace_id,
+                {"error": result.error} if result.error else {},
+            )
+        except Exception:
+            logger.debug("Agent observability degraded", exc_info=True)
 
     @abstractmethod
     async def _execute_impl(self, state: dict[str, Any]) -> AgentResult:

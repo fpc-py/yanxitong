@@ -5,6 +5,7 @@ import logging
 import re
 
 from src.agents.base import AgentResult, BaseAgent
+from src.tools.paper_schema import make_paper_id
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,23 @@ class AcademicReviewerAgent(BaseAgent):
 
         review = self._parse_review(resp)
 
+        # 规格④引用溯源：草稿中的 [n] 标记回溯到检索到的论文（KG Paper 身份）
+        trace = self._trace_citations(draft, state.get("literature_results") or [])
+        citations_block = review.get("citations")
+        if not isinstance(citations_block, dict):
+            citations_block = {}
+        existing_missing = citations_block.get("missing_citations") or []
+        if not isinstance(existing_missing, list):
+            existing_missing = []
+        citations_block["missing_citations"] = list(dict.fromkeys(
+            [*existing_missing, *(f"[{n}] 无对应文献" for n in trace["unresolved"])]
+        ))
+        review["citations"] = citations_block
+        self._audit("citation_trace", {
+            "resolved": len(trace["resolved"]),
+            "unresolved": len(trace["unresolved"]),
+        })
+
         self._audit("review_complete", {"overall_score": review.get("overall_score", 0)})
 
         return AgentResult(
@@ -81,9 +99,27 @@ class AcademicReviewerAgent(BaseAgent):
                 "review": review,
                 "draft": draft[:5000],
                 "style": style,
+                "citation_trace": trace,
             },
             confidence=review.get("overall_score", 60) / 100.0,
         )
+
+    def _trace_citations(self, draft: str, papers: list[dict]) -> dict:
+        """把草稿的 [n] 引用标记逐条回溯到检索论文（编号 = 文献列表 1 基下标）。"""
+        markers = sorted({int(n) for n in re.findall(r"\[(\d+)\]", draft or "")})
+        resolved, unresolved = [], []
+        for n in markers:
+            if 1 <= n <= len(papers):
+                paper = papers[n - 1]
+                resolved.append({
+                    "marker": f"[{n}]",
+                    "paper_id": make_paper_id(paper),
+                    "title": paper.get("title", ""),
+                    "arxiv_id": paper.get("arxiv_id", ""),
+                })
+            else:
+                unresolved.append(n)
+        return {"resolved": resolved, "unresolved": unresolved, "markers": len(markers)}
 
     def _parse_review(self, resp: str) -> dict:
         try:

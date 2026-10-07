@@ -1,15 +1,15 @@
-"""上传文档的轻量实体抽取：前若干块 → LLM → Neo4j（不污染会话图谱）。
+"""上传文档的轻量实体抽取：前若干块 → LLM → Neo4j（不污染论文图谱）。
 
-复用 kg_builder 的 ENTITY_PROMPT 与 LLM 调用链（语义缓存/熔断）；实体 id
-加库前缀（``kb:team|`` / ``kb:{owner}|``），与论文会话图谱（``{session_id}|``）
-彻底隔离。任何失败只降级记录，不影响上传主流程。
+复用 kg_builder 的 schema 封闭约束（提示词由配置生成、写入前代码级 gate）；
+实体 id 加库前缀（``kb:team|`` / ``kb:{owner}|``），与论文事实图谱
+（全局累积）保持隔离。任何失败只降级记录，不影响上传主流程。
 """
 
 import asyncio
 import logging
 
 from src.agents.base import parse_llm_json
-from src.agents.kg_builder.agent import ENTITY_PROMPT, KGBuilderAgent
+from src.agents.kg_builder.agent import KGBuilderAgent, entity_prompt_template, schema_entity_type, schema_relation_type
 from src.core.config import get_settings
 from src.knowledge.graph_store import get_graph_store
 
@@ -37,12 +37,32 @@ async def _extract_one(chunk: dict, filename: str, sem: asyncio.Semaphore) -> di
         text = (chunk.get("text") or "")[:TEXT_LIMIT]
         if len(text) < 50:
             return {}
-        prompt = ENTITY_PROMPT.format(title=filename, abstract=text)
+        prompt = entity_prompt_template().format(title=filename, abstract=text)
         try:
-            return parse_llm_json(await _get_agent()._call_llm(prompt, json_mode=True))
+            raw = parse_llm_json(await _get_agent()._call_llm(prompt, json_mode=True))
         except Exception as exc:
             logger.warning("KB NER 抽取失败: %s", exc)
             return {}
+        return _gate(raw)
+
+
+def _gate(raw: dict) -> dict:
+    """把 LLM 输出收敛到封闭 schema（本地 uid 保留，供关系端点引用）。"""
+    entities, valid_uids = [], set()
+    for ent in raw.get("entities") or []:
+        etype = schema_entity_type(ent.get("type"))
+        name = str(ent.get("name") or "").strip()
+        if not etype or not name or ent.get("id") is None:
+            continue
+        valid_uids.add(str(ent.get("id")))
+        entities.append({"id": str(ent.get("id")), "type": etype, "name": name})
+    relations = []
+    for rel in raw.get("relations") or []:
+        rtype = schema_relation_type(rel.get("type"))
+        if not rtype or str(rel.get("source_id")) not in valid_uids or str(rel.get("target_id")) not in valid_uids:
+            continue
+        relations.append({"source_id": str(rel.get("source_id")), "target_id": str(rel.get("target_id")), "type": rtype})
+    return {"entities": entities, "relations": relations}
 
 
 async def index_chunks(chunks: list[dict], library: str, owner: str, filename: str) -> dict:

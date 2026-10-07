@@ -8,7 +8,7 @@ from src.core.config import get_settings
 from src.knowledge.graph_store import get_graph_store
 from src.mcp_servers.registry import DEFAULT_SOURCES, SEARCH_TOOL
 from src.tools.mcp_runtime import call_tool
-from src.tools.paper_schema import merge_dedup
+from src.tools.paper_schema import merge_dedup, paper_identity
 from src.knowledge.vector_store import get_vector_store
 
 logger = logging.getLogger(__name__)
@@ -99,6 +99,28 @@ class RetrieverAgent(BaseAgent):
         gaps = await analyzer.identify_gaps(papers, sparse_entities, query)
         return conflicts, gaps
 
+    async def _link_graph(self, papers: list[dict]) -> dict:
+        """把检索结果与全局图谱关联（规格④）：只读，绝不写图。
+
+        图写入只发生在 kg_build 节点（RetrieverAgent 保持检索职责边界）。
+        返回每篇论文的确定性 paper_id（KG Paper 节点身份，可供前端深链）
+        以及已存在于图谱中的篇数——跨会话积累（规格⑦）的复用信号。
+        """
+        links = []
+        for paper in papers[:10]:
+            links.append({"title": paper.get("title", ""), **paper_identity(paper)})
+        known = 0
+        try:
+            gs = await get_graph_store()
+            found = await asyncio.wait_for(
+                gs.papers_existing([l["paper_id"] for l in links if l["paper_id"]]),
+                timeout=3,
+            )
+            known = len(found)
+        except Exception as e:
+            logger.warning("Graph association degraded: %s", e)
+        return {"papers": links, "known_in_graph": known}
+
     async def _execute_impl(self, state: dict) -> AgentResult:
         query = state.get("user_query", state.get("research_topic", ""))
         if not query:
@@ -143,4 +165,6 @@ class RetrieverAgent(BaseAgent):
                 logger.warning("Vector store indexing degraded: %s", e)
         for p in all_p[:10]:
             citations.append({"index": len(citations)+1, "title": p.get("title",""), "url": p.get("url",""), "authors": p.get("authors",[]), "year": p.get("year",0), "source": p.get("source","")})
-        return AgentResult(success=True, data={"papers": all_p, "count": len(all_p), "conflicts": conflicts, "gaps": gaps}, citations=citations, confidence=min(1.0, len(all_p)/20.0) if all_p else 0.3)
+        kg_links = await self._link_graph(all_p) if all_p else {"papers": [], "known_in_graph": 0}
+        self._audit("graph_link", {"linked": len(kg_links["papers"]), "known_in_graph": kg_links["known_in_graph"]})
+        return AgentResult(success=True, data={"papers": all_p, "count": len(all_p), "conflicts": conflicts, "gaps": gaps, "kg_links": kg_links}, citations=citations, confidence=min(1.0, len(all_p)/20.0) if all_p else 0.3)

@@ -120,6 +120,9 @@ class ResearchState(TypedDict):
     literature_conflicts: list[dict[str, Any]]      # Contradiction pairs (claim_a vs claim_b).
     research_gaps: list[dict[str, Any]]             # Identified research gaps.
     kg_snapshot: Optional[str]                      # JSON string of graph subgraph.
+    kg_stats: Optional[dict[str, Any]]              # Graph build stats for this session.
+    research_roadmap: list[dict[str, Any]]          # Timeline / evolution entries from the KG.
+    triple_report: Optional[dict[str, Any]]         # (method, dataset, metric) verification report.
     experiment_results: Optional[dict[str, Any]]    # ExperimentReport as a dict.
     writing_draft: Optional[str]
 
@@ -174,6 +177,9 @@ def create_initial_state(
         literature_conflicts=[],
         research_gaps=[],
         kg_snapshot=None,
+        kg_stats=None,
+        research_roadmap=[],
+        triple_report=None,
         experiment_results=None,
         writing_draft=None,
         confidence_scores={},

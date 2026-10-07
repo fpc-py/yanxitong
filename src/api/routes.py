@@ -11,6 +11,7 @@ from src.api.schemas import (
     UploadResponse, SessionListItem,
     SystemCapabilities, DefenseItem, MetricsSummary,
     KnowledgeFileItem, KnowledgeUploadResult,
+    ReviewDecisionRequest,
 )
 from src.api.deps import Identity, consume_question_quota, get_identity
 from src.api.auth_routes import router as auth_router
@@ -254,11 +255,37 @@ async def format_bibliography(session_id: str, request: Request, style: str = "g
 
 # ---- Session info endpoints ----
 
+async def _graph():
+    """Knowledge-graph store handle (lazy import keeps API import light)."""
+    from src.knowledge.graph_store import get_graph_store
+
+    return await get_graph_store()
+
+
+def _kg_schema() -> dict:
+    kg = get_settings().kg
+    return {"entity_types": list(kg.entity_types), "relation_types": list(kg.relation_types)}
+
+
+def _degraded(error: Exception | None = None, **extra) -> dict:
+    """Degraded payload marker: Neo4j/审计库不可达时端点仍返回 200。"""
+    payload = {"degraded": True, **extra}
+    if error is not None:
+        payload["error"] = str(error)
+    return payload
+
+
 @router.get("/session/{session_id}", response_model=SessionStatus)
 async def get_session_status(session_id: str, request: Request):
     identity = await get_identity(request)
     state = _get_owned_state(session_id, identity)
-    return SessionStatus(session_id=session_id, topic=state.get("research_topic",""), current_phase=state.get("current_phase","literature"), papers_count=len(state.get("literature_results",[])), kg_entities_count=0, confidence_scores=state.get("confidence_scores",{}), human_review_required=state.get("human_review_required",False), error=state.get("error_message"), has_data_file=bool(state.get("data_file_path","")))
+    kg_entities_count = 0
+    try:
+        gs = await _graph()
+        kg_entities_count = await gs.session_entity_count(session_id)
+    except Exception as e:
+        logger.warning("Session KG count degraded: %s", e)
+    return SessionStatus(session_id=session_id, topic=state.get("research_topic",""), current_phase=state.get("current_phase","literature"), papers_count=len(state.get("literature_results",[])), kg_entities_count=kg_entities_count, confidence_scores=state.get("confidence_scores",{}), human_review_required=state.get("human_review_required",False), error=state.get("error_message"), has_data_file=bool(state.get("data_file_path","")))
 
 
 @router.get("/session/{session_id}/citation-chain", response_model=CitationChainResponse)
@@ -491,6 +518,182 @@ async def delete_knowledge_file(filename: str, request: Request, library: str = 
     return {"ok": True, "removed": removed}
 
 
+# ---- Knowledge-graph endpoints (规格①③⑤⑥: 全局事实底座 + 复核 + 洞察 + 审计) ----
+
+@router.get("/kg/overview")
+async def kg_overview():
+    """图谱总览：Papers/Sessions/实体与关系计数 + 封闭 schema（配置为唯一权威）。"""
+    try:
+        gs = await _graph()
+        return await gs.graph_overview()
+    except Exception as e:
+        logger.warning("KG overview degraded: %s", e)
+        return _degraded(e, papers=0, sessions=0, entities={}, entities_total=0,
+                         relations={}, relations_total=0, pending_review=0, schema=_kg_schema())
+
+
+@router.get("/kg/entities/search")
+async def kg_entity_search(q: str, limit: int = 20, type: str | None = None, scope: str | None = None):
+    """实体检索：名称关键词匹配（scope=会话 id 时限定该会话可达实体，跨会话复用走全图）。"""
+    try:
+        gs = await _graph()
+        entities = await gs.search_entities_multi([q], limit=limit, scope=scope)
+        # 归一化节点形态：subgraph/neighbors 端点的节点用 id，此处把原始属性里的 entity_id 映射过去
+        entities = [{**e, "id": e.get("entity_id") or e.get("id") or ""} for e in entities]
+        if type:
+            entities = [e for e in entities if (e.get("type") or "").lower() == type.lower()]
+        return {"query": q, "count": len(entities), "entities": entities}
+    except Exception as e:
+        logger.warning("KG entity search degraded: %s", e)
+        return _degraded(e, query=q, count=0, entities=[])
+
+
+@router.get("/kg/entity/{entity_id}/neighbors")
+async def kg_entity_neighbors(entity_id: str, depth: int = 1):
+    """实体邻域（1-2 跳）：证据锚定的多跳推理入口。"""
+    try:
+        gs = await _graph()
+        return await gs.get_neighbors(entity_id, depth=max(1, min(depth, 3)))
+    except Exception as e:
+        logger.warning("KG neighbors degraded: %s", e)
+        return _degraded(e, nodes=[], edges=[])
+
+
+@router.get("/kg/papers/{paper_id}")
+async def kg_paper_detail(paper_id: str):
+    """论文节点详情（含连接实体），paper_id 形如 ax:/th:/url:。"""
+    try:
+        gs = await _graph()
+        paper = await gs.get_paper(paper_id)
+        if paper is None:
+            raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
+        return paper
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning("KG paper detail degraded: %s", e)
+        return _degraded(e, paper_id=paper_id, entities=[])
+
+
+@router.get("/kg/session/{session_id}/subgraph")
+async def kg_session_subgraph(session_id: str, request: Request, limit: int = 300):
+    """会话视图子图：(:Session)-[:RETRIEVED]->(:Paper) + 论文直接相连的实体。"""
+    identity = await get_identity(request)
+    _get_owned_state(session_id, identity)
+    try:
+        gs = await _graph()
+        return await gs.session_subgraph(session_id, limit=limit)
+    except Exception as e:
+        logger.warning("KG session subgraph degraded: %s", e)
+        return _degraded(e, session_id=session_id, nodes=[], edges=[])
+
+
+@router.get("/kg/evidence-path")
+async def kg_evidence_path(target: str, limit: int = 30):
+    """可解释证据链（规格⑥）：节点 → 带原文引文的边 → 对端论文。"""
+    try:
+        gs = await _graph()
+        path = await gs.evidence_path(target, limit=limit)
+        return {"target": target, "count": len(path), "path": path}
+    except Exception as e:
+        logger.warning("KG evidence path degraded: %s", e)
+        return _degraded(e, target=target, count=0, path=[])
+
+
+@router.get("/kg/review-queue")
+async def kg_review_queue(limit: int = 50):
+    """人工复核队列（规格③）：抽样边 + 引文校验失败的强制复核边。"""
+    try:
+        gs = await _graph()
+        queue = await gs.review_queue(limit=max(1, min(limit, 200)))
+        return {"count": len(queue), "queue": queue}
+    except Exception as e:
+        logger.warning("KG review queue degraded: %s", e)
+        return _degraded(e, count=0, queue=[])
+
+
+@router.post("/kg/review/{edge_key}")
+async def kg_mark_reviewed(edge_key: str, req: ReviewDecisionRequest, request: Request):
+    """复核判定：approved 保留边 / rejected 删边；记录复核人。"""
+    identity = await get_identity(request)
+    if req.decision not in ("approved", "rejected"):
+        raise HTTPException(status_code=400, detail="decision 仅支持 approved / rejected")
+    try:
+        gs = await _graph()
+        ok = await gs.mark_reviewed(edge_key, req.decision, note=req.note, reviewer=identity.label)
+    except Exception as e:
+        logger.warning("KG review write degraded: %s", e)
+        return _degraded(e, ok=False, edge_key=edge_key)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Edge {edge_key} not found")
+    try:
+        from src.observability.audit_store import record_audit
+
+        record_audit("", "human_review", f"review_{req.decision}",
+                     {"edge_key": edge_key, "note": req.note, "reviewer": identity.label})
+    except Exception as e:  # 审计失败不阻塞复核结果
+        logger.debug("Audit write degraded: %s", e)
+    return {"ok": True, "edge_key": edge_key, "decision": req.decision}
+
+
+@router.get("/kg/roadmap")
+async def kg_roadmap(session_id: str | None = None):
+    """研究洞察（规格⑤）：时间线 / 技术演进链 / 矛盾 / 研究空白。"""
+    from src.analysis.roadmap import RoadmapBuilder
+
+    try:
+        return await RoadmapBuilder().build(scope=session_id)
+    except Exception as e:
+        logger.warning("KG roadmap degraded: %s", e)
+        return _degraded(e, timeline=[], evolution=[], contradictions=[], gaps=[])
+
+
+@router.get("/kg/gaps")
+async def kg_gaps(scope: str | None = None, limit: int = 20):
+    """研究空白候选：低度数实体（会话视图内优先）。"""
+    try:
+        gs = await _graph()
+        gaps = await gs.find_sparse_entities(scope=scope, limit=max(1, min(limit, 100)))
+        return {"count": len(gaps), "gaps": gaps}
+    except Exception as e:
+        logger.warning("KG gaps degraded: %s", e)
+        return _degraded(e, count=0, gaps=[])
+
+
+@router.get("/kg/hallucination-flags")
+async def kg_hallucination_flags(session_id: str = "", limit: int = 100):
+    """幻觉标记审计（规格③）：三元组冲突 + 质量门禁升级记录。"""
+    from src.observability import audit_store
+
+    return {"flags": audit_store.recent_flags(session_id, limit=max(1, min(limit, 500)))}
+
+
+@router.get("/kg/audit")
+async def kg_audit_log(session_id: str = "", limit: int = 200):
+    """审计日志：建图统计、复核操作等关键事件。"""
+    from src.observability import audit_store
+
+    return {"entries": audit_store.recent_audit(session_id, limit=max(1, min(limit, 500)))}
+
+
+@router.get("/kg/trace/{session_id}")
+async def kg_session_trace(session_id: str, request: Request, limit: int = 500):
+    """推理轨迹面板（规格⑥）：agent 执行 span + 幻觉标记 + 审计事件。"""
+    from src.observability import audit_store
+
+    identity = await get_identity(request)
+    _get_owned_state(session_id, identity)
+    return audit_store.session_trace(session_id, limit=max(1, min(limit, 1000)))
+
+
+@router.post("/kg/backfill")
+async def kg_backfill():
+    """从 data/sessions.db 的历史文献结果重建图谱（确定性通道，幂等）。"""
+    from src.knowledge.graph_backfill import backfill
+
+    return await backfill()
+
+
 @router.delete("/session/{session_id}")
 async def delete_session(session_id: str, request: Request):
     """删除会话；不存在时静默返回 ok，属于他人时返回 404（不泄露存在性）。"""
@@ -515,7 +718,7 @@ def _session_summary(session_id: str, state: dict) -> SessionListItem:
 
 
 def _build_response(session_id: str, result: dict, quota_remaining: int | None = None) -> QueryResponse:
-    return QueryResponse(session_id=session_id, answer=result.get("final_response","No response generated"), confidence=result.get("confidence_scores",{}).get("supervisor",0.5), citations=result.get("citation_chain",[]), human_review_required=result.get("human_review_required",False), phase=result.get("current_phase","literature"), quota_remaining=quota_remaining)
+    return QueryResponse(session_id=session_id, answer=result.get("final_response","No response generated"), confidence=result.get("confidence_scores",{}).get("supervisor",0.5), citations=result.get("citation_chain",[]), human_review_required=result.get("human_review_required",False), phase=result.get("current_phase","literature"), quota_remaining=quota_remaining, triple_report=result.get("triple_report"))
 
 
 def _format_design_response(design: dict) -> str:

@@ -47,8 +47,9 @@ logs/
 *.pid
 *.tmp
 
-# --- 运行时数据（会话库 / 论文向量索引 / 上传文件）--------------
+# --- 运行时数据（会话库 / 论文向量索引 / 上传文件 / 审计库）----
 data/sessions.db
+data/audit.db
 data/faiss/
 data/uploads/
 

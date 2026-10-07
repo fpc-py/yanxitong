@@ -12,6 +12,7 @@ Merged records keep the first (richest) occurrence and absorb missing fields,
 longer abstracts, citation counts, and union of per-source lists.
 """
 
+import hashlib
 import logging
 import re
 from typing import Optional
@@ -87,6 +88,41 @@ def arxiv_key(arxiv_id: str) -> str:
         return ""
     m = _ARXIV_ID_RE.search(arxiv_id) or _ARXIV_OLD_ID_RE.search(arxiv_id)
     return m.group(1).lower() if m else arxiv_id.strip().lower()
+
+
+def title_hash(title: str) -> str:
+    """Stable hex digest of the normalized title (``""`` when nothing remains)."""
+    norm = normalize_title(title)
+    return hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16] if norm else ""
+
+
+def make_paper_id(paper: dict) -> str:
+    """Deterministic graph identity for a paper.
+
+    Priority order: arXiv id (``ax:``) > normalized-title hash (``th:``) >
+    URL hash (``url:``). The same paper always maps to the same id no matter
+    which source delivered it or how often it is re-retrieved, which is what
+    makes Neo4j MERGE idempotent and lets the graph accumulate across sessions.
+    """
+    arxiv = arxiv_key(paper.get("arxiv_id") or extract_arxiv_id(paper))
+    if arxiv:
+        return f"ax:{arxiv}"
+    th = title_hash(paper.get("title", ""))
+    if th:
+        return f"th:{th}"
+    url = (paper.get("url") or "").strip()
+    if url:
+        return "url:" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
+    return ""
+
+
+def paper_identity(paper: dict) -> dict:
+    """Identity bundle for graph writes: ``{paper_id, title_hash, arxiv_id}``."""
+    return {
+        "paper_id": make_paper_id(paper),
+        "title_hash": title_hash(paper.get("title", "")),
+        "arxiv_id": arxiv_key(paper.get("arxiv_id") or extract_arxiv_id(paper)),
+    }
 
 
 def normalize_paper(paper: dict) -> dict:

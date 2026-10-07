@@ -192,22 +192,25 @@ class KBConfig(_EnvFirstConfig):
 
 
 class KGBuilderConfig(_EnvFirstConfig):
-    """Ontology and extraction limits for the knowledge-graph builder."""
+    """Ontology, extraction limits and graph behaviour for the knowledge-graph builder.
+
+    ``entity_types`` / ``relation_types`` are the single source of truth for the
+    closed schema: the extraction prompt is generated from them and every write
+    path drops out-of-schema payloads, so prompt and gate can never drift apart.
+    """
 
     model_config = SettingsConfigDict(env_prefix="KG_", populate_by_name=True, extra="ignore")
 
     entity_types: list[str] = Field(
         default_factory=lambda: [
+            "ResearchProblem",
             "Method",
             "Dataset",
-            "Metric",
             "Model",
-            "Theory",
-            "Author",
-            "Publication",
-            "Field",
-            "Tool",
+            "Metric",
             "Finding",
+            "Author",
+            "Venue",
         ]
     )
     """Closed set of entity labels the extractor is allowed to emit."""
@@ -215,19 +218,44 @@ class KGBuilderConfig(_EnvFirstConfig):
     relation_types: list[str] = Field(
         default_factory=lambda: [
             "PROPOSES",
-            "EVALUATES",
-            "OUTPERFORMS",
-            "CITES",
             "USES_DATASET",
-            "IMPROVES",
+            "USES_METRIC",
+            "EVALUATED_ON",
+            "OUTPERFORMS",
+            "IMPROVES_ON",
+            "BASED_ON",
+            "EXTENDS",
             "COMPARES_WITH",
-            "BELONGS_TO",
+            "APPLIED_TO",
+            "CITES",
+            "CONTRADICTS",
         ]
     )
     """Closed set of relation types the extractor is allowed to emit."""
 
-    max_entities_per_doc: int = 50
+    max_entities_per_doc: int = 60
     """Hard cap on entities extracted from a single document."""
+
+    max_papers: int = 25
+    """Upper bound of papers receiving the LLM relation pass per build."""
+
+    concurrency: int = 5
+    """Upper bound of concurrent relation-extraction LLM calls."""
+
+    build_enabled: bool = True
+    """Master switch; disabling skips every graph write (rollback lever)."""
+
+    llm_relation_pass: bool = True
+    """Whether the LLM supplements deterministic edges with inter-entity relations."""
+
+    hops: int = 2
+    """Neighborhood expansion depth used by GraphRAG fusion."""
+
+    context_chars: int = 1800
+    """Character budget for the KG section of the fused answer context."""
+
+    review_sample_rate: float = 0.1
+    """Deterministic share of newly written edges sampled into the human-review queue."""
 
 
 class SandboxConfig(_EnvFirstConfig):

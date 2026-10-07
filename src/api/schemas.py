@@ -28,6 +28,13 @@ class UploadResponse(BaseModel):
     message: str
 
 
+class ReviewDecisionRequest(BaseModel):
+    """图谱边人工复核判定（规格③）。"""
+
+    decision: str = Field(..., description="approved | rejected")
+    note: str = Field("", description="复核备注")
+
+
 class QueryResponse(BaseModel):
     session_id: str
     answer: str
@@ -42,6 +49,10 @@ class QueryResponse(BaseModel):
     quota_remaining: Optional[int] = Field(
         None,
         description="未登录用户的剩余免费问答次数；已登录或配额服务不可用时为 null",
+    )
+    triple_report: Optional[dict] = Field(
+        None,
+        description="三元组幻觉校验报告：{checked, score, states, flags, triples}",
     )
 
 

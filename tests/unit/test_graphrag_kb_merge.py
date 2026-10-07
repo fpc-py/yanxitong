@@ -16,7 +16,13 @@ class _StubPaperStore:
 
 
 class _StubGraphStore:
-    async def search_entities_multi(self, names, scope=None):
+    async def search_entities_multi(self, names, limit=200, scope=None):
+        return []
+
+    async def multi_hop_paths(self, entry_ids, hops=2, limit=120):
+        return {"nodes": [], "edges": [], "paths": []}
+
+    async def chain_query(self, paper_ids, limit=40):
         return []
 
 

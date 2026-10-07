@@ -1,11 +1,12 @@
 <script setup lang="ts">
-// 文献与引用：三页签 —— 引用链（结论 → 证据）/ 文献矩阵（结构化抽取）/ 矛盾与空白
+// 文献与引用：四页签 —— 引用链（结论 → 证据）/ 文献矩阵（结构化抽取）/ 矛盾与空白 / 证据链（图谱追溯）
 // 统计卡与页签共同消费 session store（会话状态、citation-chain、matrix/conflicts/gaps 端点）
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSessionStore } from '@/stores/session'
 import LiteratureMatrix from '@/components/workbench/LiteratureMatrix.vue'
 import LiteratureInsights from '@/components/workbench/LiteratureInsights.vue'
+import EvidenceChain from '@/components/workbench/EvidenceChain.vue'
 
 const store = useSessionStore()
 const router = useRouter()
@@ -150,6 +151,10 @@ onMounted(() => {
             <span class="tab-badge mono">{{ store.conflicts.length + store.researchGaps.length }}</span>
           </template>
           <LiteratureInsights />
+        </el-tab-pane>
+
+        <el-tab-pane label="证据链" name="evidence">
+          <EvidenceChain v-if="activeTab === 'evidence'" />
         </el-tab-pane>
       </el-tabs>
     </div>

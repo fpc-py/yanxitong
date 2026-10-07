@@ -69,6 +69,10 @@ async def test_execute_impl_retries_with_fallback_candidate():
             return [], {"arxiv": 0, "openalex": 0, "semantic_scholar": 0}
         return [{"title": "Perovskite stability", "source": "openalex"}], {"arxiv": 0, "openalex": 1, "semantic_scholar": 0}
 
+    class _StubGraphStore:
+        async def papers_existing(self, ids):
+            return []
+
     state = {
         "user_query": QUERY,
         "research_topic": TOPIC,
@@ -78,6 +82,7 @@ async def test_execute_impl_retries_with_fallback_candidate():
     with patch.object(agent, "_search_all_sources", side_effect=fake_search), \
          patch.object(agent, "_analyze_literature", new=AsyncMock(return_value=([], []))), \
          patch("src.agents.retriever.agent.get_vector_store", return_value=fake_vs), \
+         patch("src.agents.retriever.agent.get_graph_store", new=AsyncMock(return_value=_StubGraphStore())), \
          patch("src.agents.retriever.agent.PaperEnricher") as enricher_cls:
         enricher_cls.return_value.enrich_papers = AsyncMock(side_effect=lambda papers, q: papers)
         result = await agent._execute_impl(state)
@@ -85,3 +90,7 @@ async def test_execute_impl_retries_with_fallback_candidate():
     assert calls == ["distilled en keywords", TOPIC]
     assert result.success
     assert result.data["count"] == 1
+    # 检索结果携带确定性图谱身份（只读关联，不写图）
+    link = result.data["kg_links"]["papers"][0]
+    assert link["paper_id"].startswith("th:") and link["title_hash"]
+    assert result.data["kg_links"]["known_in_graph"] == 0

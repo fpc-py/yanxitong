@@ -103,7 +103,7 @@ async function onLogout(): Promise<void> {
                 <div class="am-sub mono">UID · {{ auth.user?.id }}</div>
               </div>
             </div>
-            <p class="am-note">研究会话、文献库与知识图谱已绑定当前账号，且与其他用户相互隔离。</p>
+            <p class="am-note">研究会话与文献库绑定当前账号；论文事实图谱全组共享积累。</p>
             <el-button class="am-submit" :loading="auth.loading" @click="onLogout">退出登录</el-button>
           </template>
 
