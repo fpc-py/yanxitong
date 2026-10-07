@@ -61,10 +61,10 @@ export const useSystemStore = defineStore('system', () => {
     }
   }
 
-  /** 上传知识库文档；失败抛出，由调用方 ElMessage 提示 */
-  async function uploadKnowledge(file: File): Promise<KnowledgeUploadResult> {
+  /** 上传知识库文档（library=team 共享库需登录）；失败抛出，由调用方 ElMessage 提示 */
+  async function uploadKnowledge(file: File, library: 'team' | 'personal' = 'personal'): Promise<KnowledgeUploadResult> {
     try {
-      const res = await api.uploadKnowledge(file)
+      const res = await api.uploadKnowledge(file, library)
       await loadKnowledgeFiles()
       return res
     } catch (e) {
@@ -73,10 +73,10 @@ export const useSystemStore = defineStore('system', () => {
     }
   }
 
-  /** 删除知识库文件；成功返回 true，失败返回 false（调用方可选择提示） */
-  async function removeKnowledge(name: string): Promise<boolean> {
+  /** 删除知识库文件（team 共享库仅上传者可删）；成功返回 true，失败返回 false（调用方可选择提示） */
+  async function removeKnowledge(name: string, library: 'team' | 'personal' = 'personal'): Promise<boolean> {
     try {
-      await api.deleteKnowledgeFile(name)
+      await api.deleteKnowledgeFile(name, library)
       await loadKnowledgeFiles()
       return true
     } catch (e) {

@@ -18,6 +18,9 @@ class ClaimEvidence:
     excerpt_similarity: float = 0.0
     page: str = ""
     confidence: float = 1.0
+    kind: str = "paper"        # paper | knowledge（上传文档块）
+    filename: str = ""         # 知识库条目来源文件名
+    chunk_hash: str = ""       # 知识库条目块哈希（前端原文溯源用）
 
 
 @dataclass
@@ -36,7 +39,16 @@ class CitationChain:
             "claims": [
                 {
                     "claim": c.claim[:200],
-                    "source": {"title": c.source_title, "url": c.source_url, "authors": c.source_authors, "year": c.source_year},
+                    "source": {
+                        "title": c.source_title,
+                        "url": c.source_url,
+                        "authors": c.source_authors,
+                        "year": c.source_year,
+                        "kind": c.kind,
+                        "filename": c.filename,
+                        "chunk_hash": c.chunk_hash,
+                        "page": c.page,
+                    },
                     "evidence": {"excerpt": c.excerpt[:300], "similarity": round(c.excerpt_similarity, 3), "page": c.page},
                     "confidence": round(c.confidence, 3),
                 }
@@ -71,27 +83,57 @@ class CitationTracker:
         return [s.strip() for s in re.split(r'[.。!！?？\n]', text) if len(s.strip()) > 15]
 
     @staticmethod
+    def _cjk_bigrams(text: str) -> set[str]:
+        return {text[i:i + 2] for i in range(len(text) - 1)
+                if "\u4e00" <= text[i] <= "\u9fff" and "\u4e00" <= text[i + 1] <= "\u9fff"}
+
+    @staticmethod
+    def _score_overlap(claim: str, text: str) -> float:
+        """Claim↔source overlap: whitespace tokens, plus CJK char bigrams
+
+        （中文没有空格分词，纯 token 交集恒为 0；二元组让“近端项/客户端”这类
+        短语能对上 KB 原文，引用链才能挂到上传文档上）。
+        """
+        cl, tl = claim.lower(), text.lower()
+        cw = set(cl.split())
+        score = len(cw & set(tl.split())) / len(cw) if cw else 0.0
+        bigrams = CitationTracker._cjk_bigrams(cl)
+        if bigrams:
+            hits = sum(1 for b in bigrams if b in tl)
+            score = max(score, 0.8 * hits / len(bigrams))
+        return score
+
+    @staticmethod
     def _find_best_evidence(claim: str, source_docs: list[dict]) -> Optional[ClaimEvidence]:
         if not source_docs: return None
         best_score, best_doc, best_excerpt = 0.0, None, ""
-        cl = claim.lower(); cw = set(cl.split())
         for doc in source_docs:
             dt = " ".join([doc.get("title",""), doc.get("abstract",""), doc.get("text", doc.get("full_text_snippet",""))])
             if not dt: continue
-            dl = dt.lower(); dw = set(dl.split())
-            if not cw or not dw: continue
-            overlap = cw & dw
-            score = len(overlap) / len(cw) if cw else 0
+            score = CitationTracker._score_overlap(claim, dt)
             if score > best_score:
                 best_score = score; best_doc = doc
                 sents = re.split(r'[.。!！?？]', dt)
                 bs, be = 0, ""
                 for s in sents:
-                    sl = s.lower(); so = sum(1 for w in cw if w in sl)
+                    so = CitationTracker._score_overlap(claim, s)
                     if so > bs: bs = so; be = s.strip()
                 best_excerpt = be[:300]
         if best_doc and best_score > 0.1:
-            return ClaimEvidence(claim=claim, source_title=best_doc.get("title","Unknown"), source_url=best_doc.get("url",""), source_authors=best_doc.get("authors",[]), source_year=best_doc.get("year",0), excerpt=best_excerpt, excerpt_similarity=best_score, confidence=min(1.0, best_score * 1.5))
+            return ClaimEvidence(
+                claim=claim,
+                source_title=best_doc.get("title", "Unknown"),
+                source_url=best_doc.get("url", ""),
+                source_authors=best_doc.get("authors", []),
+                source_year=best_doc.get("year", 0),
+                excerpt=best_excerpt,
+                excerpt_similarity=best_score,
+                confidence=min(1.0, best_score * 1.5),
+                page=str(best_doc.get("page", "") or ""),
+                kind=best_doc.get("kind", "paper"),
+                filename=best_doc.get("filename", ""),
+                chunk_hash=best_doc.get("chunk_hash", ""),
+            )
         return None
 
 

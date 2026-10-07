@@ -30,21 +30,9 @@ class KGBuilderAgent(BaseAgent):
     @staticmethod
     def _parse_json(resp: str) -> dict:
         """解析模型返回的 JSON；容忍代码围栏与前后夹杂的说明文字。"""
-        resp = resp.strip()
-        if resp.startswith("```"):
-            resp = resp.split("\n", 1)[-1]
-            if resp.endswith("```"):
-                resp = resp[:-3]
-            resp = resp.strip()
-        try:
-            data = json.loads(resp)
-        except json.JSONDecodeError:
-            # 模型偶尔在 JSON 前后附带一句话，截取首个 { 到最后一个 } 再解析
-            start, end = resp.find("{"), resp.rfind("}")
-            if start == -1 or end <= start:
-                raise
-            data = json.loads(resp[start:end + 1])
-        return data if isinstance(data, dict) else {}
+        from src.agents.base import parse_llm_json
+
+        return parse_llm_json(resp, raise_on_error=True)
 
     async def _extract_one(self, paper: dict, sem: asyncio.Semaphore) -> dict:
         """抽取单篇论文的实体/关系；无有效摘要时返回空结果。"""

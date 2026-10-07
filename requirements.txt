@@ -13,6 +13,11 @@ langchain-community==0.3.27
 fastapi==0.116.1
 uvicorn[standard]==0.35.0
 python-multipart==0.0.20
+# mcp 1.30.0 pulls starlette 1.7.x which breaks fastapi 0.116.1 (<0.48);
+# pin starlette back so both import cleanly. mcp 2.x is NOT compatible with
+# pydantic 2.11.x and removed the in-memory session API we rely on.
+mcp==1.30.0
+starlette==0.47.3
 
 # --- Data models / settings / config -----------------------------------------
 pydantic==2.11.7
@@ -32,6 +37,8 @@ sentence-transformers==3.4.1
 
 # --- Document processing ------------------------------------------------------
 PyMuPDF==1.26.1
+# OCR fallback for scanned PDFs (guarded import; CPU-only onnxruntime).
+rapidocr-onnxruntime==1.4.4
 
 # --- HTTP clients -------------------------------------------------------------
 httpx==0.28.1

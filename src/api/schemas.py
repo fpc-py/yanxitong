@@ -135,6 +135,9 @@ class MetricsSummary(BaseModel):
 
 class KnowledgeFileItem(BaseModel):
     filename: str
+    library: str = "personal"
+    uploader: str = ""
+    content_hash: str = ""
     chunks: int
     chars: int
     updated_at: str = ""
@@ -145,6 +148,13 @@ class KnowledgeUploadResult(BaseModel):
     filename: str
     added: int
     total_docs: int
+    library: str = "personal"
+    parser_used: str = "text"
+    pages: int = 0
+    chunks: int = 0
+    ocr_used: bool = False
+    deduped: bool = False
+    uploader: str = ""
 
 
 class CitationChainResponse(BaseModel):

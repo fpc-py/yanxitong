@@ -25,6 +25,8 @@ async def retrieve_node(state: ResearchState) -> ResearchState:
     result = await agent.execute(state)
     if result.success and result.data:
         state["literature_results"] = result.data.get("papers", [])
+        state["literature_conflicts"] = result.data.get("conflicts", [])
+        state["research_gaps"] = result.data.get("gaps", [])
         if result.citations:
             state["citation_chain"].extend(result.citations)
         state["confidence_scores"]["retriever"] = result.confidence

@@ -4,8 +4,15 @@ Layered configuration, from lowest to highest priority:
 
 1. Hard-coded defaults declared on the ``*Config`` classes below.
 2. Values loaded from ``config.yaml`` at the repository root.
-3. Environment variables (``LLM_*``, ``RETRIEVER_*``, ``KG_*``, ``SANDBOX_*``,
-   ...), which ``pydantic-settings`` applies on top of the YAML values.
+3. Variables from the ``.env`` file (dotenv).
+4. Real environment variables (``LLM_*``, ``RETRIEVER_*``, ``KG_*``, ...).
+
+Explicit constructor kwargs win over every environment source, so tests and
+programmatic overrides stay predictable.
+
+Every block uses ``extra="ignore"``, so a config.yaml key whose name does not
+match the pydantic field exactly (e.g. ``kg_builder`` instead of ``kg``) is
+silently dropped — keys must be spelled like the fields they target.
 
 Usage::
 
@@ -17,14 +24,41 @@ Usage::
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal, Optional
+from typing import ClassVar, Literal, Optional
 
-import yaml
 from pydantic import AliasChoices, Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+    YamlConfigSettingsSource,
+)
 
 
-class LLMConfig(BaseSettings):
+class _EnvFirstConfig(BaseSettings):
+    """Base class for every config block: env vars beat YAML-provided values.
+
+    ``Settings`` receives the YAML document as one nested payload, so a block
+    like ``retriever`` reaches :class:`RetrieverConfig` as *init* values. The
+    pydantic-settings default source order puts init first, which would let
+    ``config.yaml`` silently override environment variables — the opposite of
+    the documented precedence. Reordering the sources here fixes that for
+    every nested block.
+    """
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return env_settings, dotenv_settings, init_settings, file_secret_settings
+
+
+class LLMConfig(_EnvFirstConfig):
     """Model selection and generation parameters for the agent roles.
 
     Environment variables use the ``LLM_`` prefix (e.g. ``LLM_TEMPERATURE=0.2``).
@@ -61,7 +95,7 @@ class LLMConfig(BaseSettings):
     """API key for DashScope-compatible endpoints (inject via env, never commit)."""
 
 
-class RetrieverConfig(BaseSettings):
+class RetrieverConfig(_EnvFirstConfig):
     """Parameters for literature retrieval and vector indexing."""
 
     model_config = SettingsConfigDict(env_prefix="RETRIEVER_", populate_by_name=True, extra="ignore")
@@ -84,8 +118,80 @@ class RetrieverConfig(BaseSettings):
     index_path: str = "data/faiss"
     """On-disk directory for the paper FAISS index (index.faiss + docs.json)."""
 
+    index_max_papers: int = 20
+    """Cap on papers embedded into the session index per retrieval. BGE-M3
+    encoding on CPU is the slowest link in the Q&A pipeline; RAG only reads
+    top-k, so embedding the top-N by relevance keeps first-answer latency
+    bounded without losing retrieval quality."""
 
-class KGBuilderConfig(BaseSettings):
+    openalex_max_results: int = 20
+    """Maximum number of records fetched per OpenAlex query."""
+
+    openalex_mailto: str = ""
+    """Contact e-mail for the OpenAlex polite pool (optional; raises rate limits)."""
+
+    openalex_api_key: str = ""
+    """Optional OpenAlex API key (free registration); empty string uses the anonymous tier."""
+
+
+class MCPConfig(_EnvFirstConfig):
+    """Transport and timeout policy for the paper-source MCP layer."""
+
+    model_config = SettingsConfigDict(env_prefix="MCP_", populate_by_name=True, extra="ignore")
+
+    transport: Literal["memory", "stdio"] = "memory"
+    """``memory`` runs FastMCP servers in-process; ``stdio`` spawns subprocesses per call."""
+
+    server_timeout_seconds: int = 30
+    """Per tool-call timeout before the source degrades to an empty result."""
+
+
+class ExtractionConfig(_EnvFirstConfig):
+    """Budget for the per-paper structured extraction pass."""
+
+    model_config = SettingsConfigDict(env_prefix="EXTRACTION_", populate_by_name=True, extra="ignore")
+
+    max_papers: int = 25
+    """How many top-relevance papers get the six-field LLM extraction per retrieve."""
+
+    concurrency: int = 5
+    """Upper bound of concurrent extraction LLM calls."""
+
+
+class PDFConfig(_EnvFirstConfig):
+    """PDF ingestion chain: PyMuPDF (primary) -> OCR (scans / poor text layer)."""
+
+    model_config = SettingsConfigDict(env_prefix="PDF_", populate_by_name=True, extra="ignore")
+
+    ocr_enabled: bool = True
+    """Fall back to OCR for pages that yield (nearly) no text (scanned PDFs)."""
+
+    ocr_max_pages: int = 20
+    """Upper bound of pages OCR processes per document."""
+
+    min_chars_per_page: int = 100
+    """Pages with fewer characters than this count as low-quality extraction."""
+
+
+class KBConfig(_EnvFirstConfig):
+    """User-built knowledge base: upload limits, chunking and NER budget."""
+
+    model_config = SettingsConfigDict(env_prefix="KB_", populate_by_name=True, extra="ignore")
+
+    max_upload_mb: int = 20
+    """Maximum accepted upload size."""
+
+    chunk_size: int = 800
+    """Target characters per chunk."""
+
+    chunk_overlap: int = 100
+    """Characters of overlap between consecutive chunks within a section."""
+
+    ner_max_chunks: int = 5
+    """How many leading chunks per uploaded file feed entity extraction."""
+
+
+class KGBuilderConfig(_EnvFirstConfig):
     """Ontology and extraction limits for the knowledge-graph builder."""
 
     model_config = SettingsConfigDict(env_prefix="KG_", populate_by_name=True, extra="ignore")
@@ -124,7 +230,7 @@ class KGBuilderConfig(BaseSettings):
     """Hard cap on entities extracted from a single document."""
 
 
-class SandboxConfig(BaseSettings):
+class SandboxConfig(_EnvFirstConfig):
     """Resource limits for the containerised code-execution sandbox."""
 
     model_config = SettingsConfigDict(env_prefix="SANDBOX_", populate_by_name=True, extra="ignore")
@@ -145,7 +251,7 @@ class SandboxConfig(BaseSettings):
     """Whether the sandbox container runs without network access."""
 
 
-class SafetyConfig(BaseSettings):
+class SafetyConfig(_EnvFirstConfig):
     """Thresholds for hallucination guards and self-consistency checks."""
 
     model_config = SettingsConfigDict(env_prefix="SAFETY_", populate_by_name=True, extra="ignore")
@@ -157,7 +263,7 @@ class SafetyConfig(BaseSettings):
     """Number of independent samples used in self-consistency voting."""
 
 
-class CacheConfig(BaseSettings):
+class CacheConfig(_EnvFirstConfig):
     """Answer-cache semantics for the retrieval/Q&A pipeline."""
 
     model_config = SettingsConfigDict(env_prefix="CACHE_", populate_by_name=True, extra="ignore")
@@ -169,7 +275,7 @@ class CacheConfig(BaseSettings):
     """Embedding similarity above which a query hits the cache."""
 
 
-class RateLimitConfig(BaseSettings):
+class RateLimitConfig(_EnvFirstConfig):
     """Inbound request throttling for the API layer."""
 
     model_config = SettingsConfigDict(env_prefix="RATE_", populate_by_name=True, extra="ignore")
@@ -178,7 +284,7 @@ class RateLimitConfig(BaseSettings):
     """Maximum requests accepted per client per minute."""
 
 
-class MySQLConfig(BaseSettings):
+class MySQLConfig(_EnvFirstConfig):
     """Connection settings for the MySQL account/quota store."""
 
     model_config = SettingsConfigDict(env_prefix="MYSQL_", populate_by_name=True, extra="ignore")
@@ -205,7 +311,7 @@ class MySQLConfig(BaseSettings):
     """Upper bound of pooled connections."""
 
 
-class AuthConfig(BaseSettings):
+class AuthConfig(_EnvFirstConfig):
     """Registration, token lifetime and anonymous trial quota policy."""
 
     model_config = SettingsConfigDict(env_prefix="AUTH_", populate_by_name=True, extra="ignore")
@@ -229,7 +335,7 @@ class AuthConfig(BaseSettings):
     """Minimum accepted password length."""
 
 
-class Neo4jConfig(BaseSettings):
+class Neo4jConfig(_EnvFirstConfig):
     """Connection settings for the Neo4j knowledge-graph store."""
 
     model_config = SettingsConfigDict(env_prefix="NEO4J_", populate_by_name=True, extra="ignore")
@@ -244,7 +350,7 @@ class Neo4jConfig(BaseSettings):
     """Neo4j login password (override via ``NEO4J_PASSWORD``)."""
 
 
-class RedisConfig(BaseSettings):
+class RedisConfig(_EnvFirstConfig):
     """Connection settings for the Redis cache / message broker."""
 
     model_config = SettingsConfigDict(env_prefix="REDIS_", populate_by_name=True, extra="ignore")
@@ -253,7 +359,7 @@ class RedisConfig(BaseSettings):
     """Redis connection URL (``redis://``, ``rediss://`` or unix socket)."""
 
 
-class AppConfig(BaseSettings):
+class AppConfig(_EnvFirstConfig):
     """Application-server runtime settings."""
 
     model_config = SettingsConfigDict(env_prefix="APP_", populate_by_name=True, extra="ignore")
@@ -280,15 +386,21 @@ class AppConfig(BaseSettings):
 class Settings(BaseSettings):
     """Root settings aggregating every subsystem config.
 
-    Each nested block keeps its own environment prefix, so ``LLM_MODEL``-style
-    variables continue to override the corresponding leaf fields regardless of
-    how the YAML file is structured.
+    Each nested block keeps its own environment prefix and source order, so
+    ``LLM_TEMPERATURE``-style variables override the corresponding leaf fields
+    regardless of how the YAML file is structured.
     """
 
     model_config = SettingsConfigDict(env_prefix="YANXITONG_", populate_by_name=True, extra="ignore")
 
+    _yaml_file: ClassVar[Optional[str]] = None
+
     llm: LLMConfig = Field(default_factory=LLMConfig)
     retriever: RetrieverConfig = Field(default_factory=RetrieverConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
+    extraction: ExtractionConfig = Field(default_factory=ExtractionConfig)
+    pdf: PDFConfig = Field(default_factory=PDFConfig)
+    kb: KBConfig = Field(default_factory=KBConfig)
     kg: KGBuilderConfig = Field(default_factory=KGBuilderConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
@@ -301,26 +413,44 @@ class Settings(BaseSettings):
     app: AppConfig = Field(default_factory=AppConfig)
 
     @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Source order (highest first): init > env > .env > config.yaml > secrets.
+
+        The YAML document is loaded by :class:`YamlConfigSettingsSource` *below*
+        every environment-based source; previously it was passed through init
+        kwargs, which made config.yaml silently win over env vars.
+        """
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            YamlConfigSettingsSource(settings_cls, yaml_file=cls._yaml_file, yaml_file_encoding="utf-8"),
+            file_secret_settings,
+        )
+
+    @classmethod
     def from_yaml(cls, yaml_path: Optional[Path] = None) -> "Settings":
-        """Load settings from a YAML file, with env-var overrides applied.
+        """Load settings from a YAML file, with .env / env-var overrides applied.
 
         Args:
             yaml_path: Path to the YAML configuration file. Defaults to
                 ``<repo_root>/config.yaml`` (three levels above this module).
 
         Returns:
-            A fully validated :class:`Settings` instance. Missing or empty
-            YAML files simply fall back to defaults plus env overrides.
+            A fully validated :class:`Settings` instance. A missing or empty
+            YAML file simply falls back to defaults plus env overrides.
         """
         if yaml_path is None:
             yaml_path = Path(__file__).parent.parent.parent / "config.yaml"
-
-        yaml_data: dict = {}
-        if yaml_path.exists():
-            with open(yaml_path, "r", encoding="utf-8") as f:
-                yaml_data = yaml.safe_load(f) or {}
-
-        return cls(**yaml_data)
+        cls._yaml_file = str(yaml_path)
+        return cls()
 
 
 # --- module-level singleton -------------------------------------------------

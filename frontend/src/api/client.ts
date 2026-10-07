@@ -6,23 +6,27 @@ import { getAnonId, getToken } from './identity'
 import type {
   AuthResponse,
   BibliographyResponse,
+  ChunkPreview,
   Citation,
   CitationChainResponse,
   CreateSessionBody,
   HealthResponse,
   KnowledgeFileItem,
   KnowledgeUploadResult,
+  LiteratureConflictsResponse,
+  LiteratureMatrixResponse,
   MeResponse,
   MetricsSummary,
   QueryResponse,
+  ResearchGapsResponse,
   SessionListItem,
   SessionStatus,
   SystemCapabilities,
   UploadResponse,
 } from './types'
 
-/** 后端请求普遍较慢（几十秒），超时放宽到 4 分钟 */
-export const REQUEST_TIMEOUT = 240_000
+/** 后端请求普遍较慢（多智能体编排 + 结构化抽取），超时放宽到 7 分钟 */
+export const REQUEST_TIMEOUT = 420_000
 
 const http: AxiosInstance = axios.create({
   baseURL: '/api',
@@ -95,8 +99,10 @@ export function flattenCitations(raw: unknown): Citation[] {
     }
     if (typeof node !== 'object') return
     const obj = node as Record<string, unknown>
+    // 注意：source 只有在是字符串时才代表「来源」字段；claim 节点里 source 是
+    // 嵌套的论文/知识库对象，不能据此把 claim 本身当成一篇文献。
     const looksLikePaper =
-      obj.title || obj.url || obj.authors || obj.year || obj.source || obj.venue || obj.journal
+      obj.title || obj.url || obj.authors || obj.year || typeof obj.source === 'string' || obj.venue || obj.journal
 
     if (looksLikePaper) {
       const authorsRaw = obj.authors
@@ -111,20 +117,27 @@ export function flattenCitations(raw: unknown): Citation[] {
             : [],
         year: obj.year as number | string | undefined,
         source: (obj.source || obj.venue || obj.journal) as string | undefined,
+        // 知识库来源字段（citation-chain source 段携带；无需预览时静默忽略）
+        kind: typeof obj.kind === 'string' ? obj.kind : undefined,
+        filename: typeof obj.filename === 'string' ? obj.filename : undefined,
+        chunk_hash: typeof obj.chunk_hash === 'string' ? obj.chunk_hash : undefined,
+        page: (obj.page as number | string | undefined) ?? undefined,
       })
     }
 
     const nested = obj.citations || obj.evidence || obj.sources || obj.references
     if (nested) visit(nested)
+    // claim 节点（citation-chain）把真正的来源挂在 source 对象上，拍平它
+    if (obj.source && typeof obj.source === 'object') visit(obj.source)
   }
 
   visit(raw)
 
-  // 去重并按序号补齐
+  // 去重并按序号补齐（知识库条目按块哈希区分：同一文件的多个块不应互相吞并）
   const seen = new Set<string>()
   const dedup: Citation[] = []
   out.forEach((c, i) => {
-    const key = `${c.title}|${c.url ?? ''}`
+    const key = `${c.title}|${c.url ?? ''}|${c.chunk_hash ?? ''}`
     if (seen.has(key)) return
     seen.add(key)
     dedup.push({ ...c, index: c.index ?? i + 1 })
@@ -229,6 +242,34 @@ const api = {
     return data
   },
 
+  /** 11a. 文献矩阵（六字段对比表） */
+  async getLiteratureMatrix(sessionId: string): Promise<LiteratureMatrixResponse> {
+    const { data } = await http.get<LiteratureMatrixResponse>(`/session/${sessionId}/literature/matrix`)
+    return data
+  },
+
+  /** 11b. 导出文献矩阵 CSV（后端已带 UTF-8 BOM） */
+  async exportMatrixCsv(sessionId: string): Promise<Blob> {
+    const { data } = await http.get<Blob>(`/session/${sessionId}/literature/matrix`, {
+      params: { format: 'csv' },
+      responseType: 'blob',
+      timeout: 60_000,
+    })
+    return data
+  },
+
+  /** 11c. 矛盾检测结果 */
+  async getConflicts(sessionId: string): Promise<LiteratureConflictsResponse> {
+    const { data } = await http.get<LiteratureConflictsResponse>(`/session/${sessionId}/literature/conflicts`)
+    return data
+  },
+
+  /** 11d. 研究空白（KG 稀疏节点 + 局限性归纳） */
+  async getResearchGaps(sessionId: string): Promise<ResearchGapsResponse> {
+    const { data } = await http.get<ResearchGapsResponse>(`/session/${sessionId}/literature/research-gaps`)
+    return data
+  },
+
   /** 12. 会话列表（历史会话侧栏） */
   async getSessions(): Promise<SessionListItem[]> {
     const { data } = await http.get<SessionListItem[]>('/sessions')
@@ -252,26 +293,37 @@ const api = {
     return data
   },
 
-  /** 16. 上传知识库文档（.txt/.md/.pdf，multipart 需显式覆盖 Content-Type） */
-  async uploadKnowledge(file: File): Promise<KnowledgeUploadResult> {
+  /** 16. 上传知识库文档（.txt/.md/.pdf；library=team 需登录） */
+  async uploadKnowledge(file: File, library: 'team' | 'personal' = 'personal'): Promise<KnowledgeUploadResult> {
     const form = new FormData()
     form.append('file', file)
+    form.append('library', library)
     const { data } = await http.post<KnowledgeUploadResult>('/knowledge/upload', form, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 60_000,
+      timeout: 300_000,
     })
     return data
   },
 
-  /** 17. 知识库文件列表 */
+  /** 17. 知识库文件列表（team 共享 + 本人 private 合并） */
   async getKnowledgeFiles(): Promise<KnowledgeFileItem[]> {
     const { data } = await http.get<KnowledgeFileItem[]>('/knowledge/files')
     return data
   },
 
-  /** 18. 删除知识库文件 */
-  async deleteKnowledgeFile(name: string): Promise<{ ok: boolean }> {
-    const { data } = await http.delete<{ ok: boolean }>(`/knowledge/file/${encodeURIComponent(name)}`)
+  /** 17a. 知识块原文预览（前后各一块，引用溯源） */
+  async getChunkPreview(filename: string, chunkHash: string): Promise<ChunkPreview> {
+    const { data } = await http.get<ChunkPreview>('/knowledge/chunk', {
+      params: { filename, chunk_hash: chunkHash },
+    })
+    return data
+  },
+
+  /** 18. 删除知识库文件（team 仅上传者可删） */
+  async deleteKnowledgeFile(name: string, library: 'team' | 'personal' = 'personal'): Promise<{ ok: boolean }> {
+    const { data } = await http.delete<{ ok: boolean }>(`/knowledge/file/${encodeURIComponent(name)}`, {
+      params: { library },
+    })
     return data
   },
 

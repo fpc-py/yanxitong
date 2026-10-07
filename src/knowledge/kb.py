@@ -1,12 +1,16 @@
-"""知识库：用户上传文档 → 分块 → 嵌入 → 独立 FAISS 索引（data/knowledge_base）。
+"""知识库：上传文档 → 三级解析 → 分块嵌入 → 独立 FAISS 索引（data/knowledge_base）。
 
-与论文检索索引（data/faiss）分离；检索逻辑复用 VectorStore.search，
-上传文档带 kind="knowledge" 元数据，检索时自动纳入 RAG 知识边界。
+双区模型：
+- team 库（scope="kb:team"）：课题组共享，登录用户可上传，全员可检索，仅上传者可删；
+- personal 库（scope="kb:{owner}"）：仅本人可见、可删（匿名身份同样适用）。
+
+与论文检索索引（data/faiss）分离；每个块带页码/段号/章节/字符区间元数据，
+供 GraphRAG 合并检索（[KB:filename p{page}] 标记）与前端 span 溯源使用。
 """
 
+import hashlib
 import logging
 import os
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,30 +19,22 @@ from src.knowledge.vector_store import VectorStore
 logger = logging.getLogger(__name__)
 
 KB_DIR = os.path.join("data", "knowledge_base")
-KB_CHUNK = 500  # 每块字符上限（中文按字符计，保守分块）
-KB_PREVIEW = 80  # 列表预览字符数
-
-
-def _split_chunks(text: str, size: int = KB_CHUNK) -> list[str]:
-    """按段落折叠后定长切块，尽量保持语义就近。"""
-    text = re.sub(r"\n{3,}", "\n\n", text.strip())
-    paragraphs = [p.strip() for p in re.split(r"\n+", text) if p.strip()]
-    chunks: list[str] = []
-    buf = ""
-    for para in paragraphs:
-        while len(para) > size:
-            chunks.append(para[:size])
-            para = para[size:]
-        if buf and len(buf) + len(para) + 1 > size:
-            chunks.append(buf)
-            buf = ""
-        buf = (buf + "\n" + para).strip() if buf else para
-    if buf:
-        chunks.append(buf)
-    return [c for c in chunks if c]
-
+KB_PREVIEW = 80
+TEAM_SCOPE = "kb:team"
 
 _kb_store: VectorStore | None = None
+
+
+def team_scope() -> str:
+    return TEAM_SCOPE
+
+
+def personal_scope(owner: str) -> str:
+    return f"kb:{owner}"
+
+
+def scope_of(library: str, owner: str) -> str:
+    return TEAM_SCOPE if library == "team" else personal_scope(owner)
 
 
 def get_kb_store() -> VectorStore:
@@ -52,29 +48,93 @@ def get_kb_store() -> VectorStore:
     return _kb_store
 
 
-def add_file(filename: str, content: str, owner: str = "") -> int:
-    """分块入库并持久化，返回新增块数；owner 为上传者身份标识（用户间隔离）。"""
-    store = get_kb_store()
-    now = datetime.now(timezone.utc).isoformat()
-    chunks = _split_chunks(content)
+def add_chunks(filename: str, chunks: list[dict], library: str, owner: str, content_hash: str = "") -> int:
+    """把解析出的块写入对应库并落盘，返回新增块数；块级 sha256 去重。
+
+    每个 chunk 来自 ``pdf_ingest.chunk_parsed_doc``：含 text/page/para/
+    section_title/char_start/char_end/chunk_index。
+    """
     if not chunks:
         return 0
-    store.add_documents(
-        [{"text": c, "kind": "knowledge", "filename": filename, "owner": owner, "uploaded_at": now} for c in chunks]
-    )
-    store.save(KB_DIR)
-    return len(chunks)
-
-
-def list_files(owner: str = "") -> list[dict]:
-    """按文件名聚合「该 owner」的知识库文档：块数 / 总字符 / 最新时间 / 首块预览。"""
     store = get_kb_store()
-    grouped: dict[str, dict] = {}
-    for doc in store._documents.values():
-        if doc.get("kind") != "knowledge" or doc.get("owner", "") != owner:
+    scope = scope_of(library, owner)
+    now = datetime.now(timezone.utc).isoformat()
+    seen = {d.get("chunk_hash") for d in store._documents.values() if d.get("scope") == scope}
+    docs = []
+    for ch in chunks:
+        text = (ch.get("text") or "").strip()
+        if not text:
+            continue
+        chunk_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if chunk_hash in seen:
+            continue
+        seen.add(chunk_hash)
+        docs.append({
+            "text": text,
+            "kind": "knowledge",
+            "library": library,
+            "scope": scope,
+            "owner": owner,
+            "content_hash": content_hash,
+            "filename": filename,
+            "page": ch.get("page", 0),
+            "para": ch.get("para", 0),
+            "section_title": ch.get("section_title", ""),
+            "chunk_index": ch.get("chunk_index", 0),
+            "chunk_hash": chunk_hash,
+            "char_start": ch.get("char_start", 0),
+            "char_end": ch.get("char_end", 0),
+            "uploaded_at": now,
+        })
+    if not docs:
+        return 0
+    store.add_documents(docs)
+    store.save(KB_DIR)
+    return len(docs)
+
+
+def find_by_hash(library: str, owner: str, content_hash: str) -> dict | None:
+    """同一库中是否已存在该内容哈希的文档（重复上传秒答 deduped）。"""
+    if not content_hash:
+        return None
+    scope = scope_of(library, owner)
+    for doc in get_kb_store()._documents.values():
+        if doc.get("scope") == scope and doc.get("content_hash") == content_hash:
+            return {
+                "filename": doc.get("filename", ""),
+                "owner": doc.get("owner", ""),
+                "uploaded_at": doc.get("uploaded_at", ""),
+            }
+    return None
+
+
+def query_chunks(query: str, scopes: list[str], top_k: int = 5) -> list[dict]:
+    """按 scope 列表做向量检索（GraphRAG 合并 team + 个人双区）。"""
+    if not scopes:
+        return []
+    return get_kb_store().search(query, top_k=top_k, scopes=scopes)
+
+
+def list_files(owner: str) -> list[dict]:
+    """列出「team 共享库 + 本人 personal 库」的文档，按 库+文件名+上传者 聚合。"""
+    allowed = {TEAM_SCOPE, personal_scope(owner)}
+    grouped: dict[tuple, dict] = {}
+    for doc in get_kb_store()._documents.values():
+        if doc.get("kind") != "knowledge" or doc.get("scope") not in allowed:
             continue
         fn = doc.get("filename", "")
-        g = grouped.setdefault(fn, {"filename": fn, "chunks": 0, "chars": 0, "updated_at": "", "preview": ""})
+        library = doc.get("library", "personal")
+        key = (library, fn, doc.get("owner", ""))
+        g = grouped.setdefault(key, {
+            "filename": fn,
+            "library": library,
+            "uploader": doc.get("owner", ""),
+            "content_hash": doc.get("content_hash", ""),
+            "chunks": 0,
+            "chars": 0,
+            "updated_at": "",
+            "preview": "",
+        })
         g["chunks"] += 1
         g["chars"] += len(doc.get("text", "") or "")
         ts = doc.get("uploaded_at", "") or ""
@@ -85,15 +145,20 @@ def list_files(owner: str = "") -> list[dict]:
     return list(grouped.values())
 
 
-def remove_file(filename: str, owner: str = "") -> int:
-    """删除该 owner 名下文件的全部块（重建索引保留其余块），返回删除块数；无匹配返回 0。"""
+def remove_file(filename: str, library: str, owner: str) -> int:
+    """删除指定库中「本人上传」的文件全部块（重建索引保留其余块），返回删除块数。"""
     store = get_kb_store()
-    remaining = [
-        d for d in store._documents.values()
-        if d.get("kind") != "knowledge"
-        or d.get("owner", "") != owner
-        or d.get("filename") != filename
-    ]
+    scope = scope_of(library, owner)
+
+    def keep(d: dict) -> bool:
+        return not (
+            d.get("kind") == "knowledge"
+            and d.get("scope") == scope
+            and d.get("filename") == filename
+            and d.get("owner", "") == owner
+        )
+
+    remaining = [d for d in store._documents.values() if keep(d)]
     removed = len(store._documents) - len(remaining)
     if removed == 0:
         return 0
@@ -102,3 +167,35 @@ def remove_file(filename: str, owner: str = "") -> int:
         store.add_documents([d])
     store.save(KB_DIR)
     return removed
+
+
+def find_chunk(owner: str, filename: str, chunk_hash: str) -> dict | None:
+    """按块哈希取块正文及前后各一块（原文预览），仅限有权访问的库。"""
+    allowed = {TEAM_SCOPE, personal_scope(owner)}
+    docs = [d for d in get_kb_store()._documents.values()
+            if d.get("kind") == "knowledge" and d.get("scope") in allowed]
+    target = next((d for d in docs if d.get("filename") == filename and d.get("chunk_hash") == chunk_hash), None)
+    if target is None:
+        return None
+    siblings = sorted(
+        (d for d in docs
+         if d.get("filename") == filename
+         and d.get("scope") == target.get("scope")
+         and d.get("owner") == target.get("owner")),
+        key=lambda d: d.get("chunk_index", 0),
+    )
+    index = next((i for i, d in enumerate(siblings) if d.get("chunk_hash") == chunk_hash), 0)
+    before = siblings[index - 1] if index > 0 else None
+    after = siblings[index + 1] if index + 1 < len(siblings) else None
+    return {
+        "filename": filename,
+        "library": target.get("library", "personal"),
+        "uploader": target.get("owner", ""),
+        "page": target.get("page", 0),
+        "section_title": target.get("section_title", ""),
+        "chunk_index": target.get("chunk_index", 0),
+        "chunk_hash": chunk_hash,
+        "text": target.get("text", ""),
+        "before": before.get("text", "") if before else "",
+        "after": after.get("text", "") if after else "",
+    }

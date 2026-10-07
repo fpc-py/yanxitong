@@ -4,7 +4,7 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import api, { REQUEST_TIMEOUT, claimConfidence, claimText, extractErrorMessage, flattenCitations, isNotFound, isQuotaExceeded } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
-import type { Citation, Claim, HealthResponse, SessionListItem, SessionStatus } from '@/api/types'
+import type { Citation, Claim, ConflictItem, GapItem, HealthResponse, MatrixRow, SessionListItem, SessionStatus } from '@/api/types'
 
 /** 一条问答记录 */
 export interface ChatMessage {
@@ -92,6 +92,11 @@ export const useSessionStore = defineStore('session', () => {
   const status = ref<SessionStatus | null>(null)
   const claims = ref<Claim[]>([])
   const averageConfidence = ref<number>(0)
+
+  // ---- 文献矩阵 / 矛盾 / 研究空白 ----
+  const matrixRows = ref<MatrixRow[]>([])
+  const conflicts = ref<ConflictItem[]>([])
+  const researchGaps = ref<GapItem[]>([])
 
   // ---- 问答 ----
   const messages = ref<ChatMessage[]>(readStoredMessages())
@@ -205,6 +210,43 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
+  // ---- 文献矩阵 / 矛盾 / 研究空白（随会话状态持久化，端点秒回） ----
+  async function loadMatrix(): Promise<void> {
+    if (!sessionId.value) return
+    try {
+      matrixRows.value = (await api.getLiteratureMatrix(sessionId.value)).rows ?? []
+    } catch (e) {
+      if (isNotFound(e)) {
+        resetSession()
+        return
+      }
+      matrixRows.value = []
+    }
+  }
+
+  async function loadConflicts(): Promise<void> {
+    if (!sessionId.value) return
+    try {
+      conflicts.value = (await api.getConflicts(sessionId.value)).conflicts ?? []
+    } catch {
+      conflicts.value = []
+    }
+  }
+
+  async function loadGaps(): Promise<void> {
+    if (!sessionId.value) return
+    try {
+      researchGaps.value = (await api.getResearchGaps(sessionId.value)).gaps ?? []
+    } catch {
+      researchGaps.value = []
+    }
+  }
+
+  /** 文献三件套一起拉取（矩阵/矛盾/空白），供文献视图与问答后刷新复用 */
+  async function loadLiteratureInsights(): Promise<void> {
+    await Promise.all([loadMatrix(), loadConflicts(), loadGaps()])
+  }
+
   // ---- 问答 ----
   function pushMessage(msg: Omit<ChatMessage, 'id' | 'at'>): ChatMessage {
     const full: ChatMessage = { ...msg, id: nextId(), at: new Date().toLocaleTimeString('zh-CN') }
@@ -265,7 +307,7 @@ export const useSessionStore = defineStore('session', () => {
       elapsedMs: ms,
     })
 
-    await Promise.all([refreshStatus(), loadCitationChain()])
+    await Promise.all([refreshStatus(), loadCitationChain(), loadLiteratureInsights()])
   }
 
   /** 切换/恢复会话：重置本地历史 */
@@ -284,6 +326,9 @@ export const useSessionStore = defineStore('session', () => {
     status.value = null
     claims.value = []
     averageConfidence.value = 0
+    matrixRows.value = []
+    conflicts.value = []
+    researchGaps.value = []
     messages.value = []
     writeStoredMessages([])
     error.value = null
@@ -331,12 +376,16 @@ export const useSessionStore = defineStore('session', () => {
     status.value = null
     claims.value = []
     averageConfidence.value = 0
+    matrixRows.value = []
+    conflicts.value = []
+    researchGaps.value = []
     error.value = null
     lastLatencyMs.value = null
     latencyLog.value = []
     // 4. 拉取目标会话状态（404 时已有逻辑会自动 reset）
     await refreshStatus()
     await loadCitationChain()
+    await loadLiteratureInsights()
     await loadSessions()
   }
 
@@ -394,6 +443,9 @@ export const useSessionStore = defineStore('session', () => {
     status,
     claims,
     averageConfidence,
+    matrixRows,
+    conflicts,
+    researchGaps,
     messages,
     sessionList,
     sessionLoaded,
@@ -416,6 +468,10 @@ export const useSessionStore = defineStore('session', () => {
     refreshHealth,
     refreshStatus,
     loadCitationChain,
+    loadMatrix,
+    loadConflicts,
+    loadGaps,
+    loadLiteratureInsights,
     sendQuery,
     resetSession,
     loadSessions,

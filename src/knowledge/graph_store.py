@@ -143,6 +143,36 @@ class GraphStore:
         )
         return [dict(r["e"]) for r in results]
 
+    async def find_sparse_entities(self, scope: Optional[str] = None, limit: int = 30) -> list[dict]:
+        """Entities with the fewest relationships — candidate research gaps.
+
+        scope：会话隔离前缀（与实体写入时的 `{scope}|` 前缀一致）。
+        """
+        params: dict = {"limit": limit}
+        scope_filter = ""
+        if scope:
+            scope_filter = "WHERE e.entity_id STARTS WITH $prefix "
+            params["prefix"] = f"{scope}|"
+        results = await self._run(
+            f"MATCH (e) {scope_filter}"
+            "OPTIONAL MATCH (e)-[r]-() "
+            "RETURN e AS entity, labels(e) AS labels, count(r) AS degree "
+            "ORDER BY degree ASC LIMIT $limit",
+            params,
+        )
+        sparse = []
+        for row in results:
+            entity = dict(row["entity"])
+            labels = row.get("labels") or []
+            sparse.append({
+                "entity_id": entity.get("entity_id", ""),
+                "name": entity.get("name", ""),
+                "type": labels[0] if labels else "",
+                "degree": row.get("degree", 0),
+            })
+        sparse.sort(key=lambda item: (item["degree"], item["name"]))
+        return sparse
+
     async def get_subgraph(self, entity_ids: list[str]) -> str:
         """Get subgraph as JSON string containing nodes and relationships."""
         results = await self._run(

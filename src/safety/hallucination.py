@@ -173,6 +173,11 @@ class HallucinationDefense:
             return False, f"检测到 {len(risks)} 个高风险模式", risks
         return True, "未检测到高风险模式", []
 
+    def _check_high_risk(self, response: str) -> bool:
+        """True when the response matches any high-risk pattern (wrapper for tests/callers)."""
+        passed, _, _ = self._check_high_risk_detailed(response)
+        return not passed
+
     def _compute_weighted_confidence(self, layers: dict) -> float:
         tw, ws = 0.0, 0.0
         for name, weight in self.LAYER_WEIGHTS.items():

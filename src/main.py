@@ -1,5 +1,6 @@
 """研析通 v2.0 — Application entry point."""
 
+import asyncio
 import logging, os
 
 from dotenv import load_dotenv
@@ -20,11 +21,31 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger(__name__)
 
 
+async def _warmup_encoders() -> None:
+    """预热论文库与知识库的 BGE-M3 编码器（线程池执行，不阻塞事件循环）。
+
+    CPU 冷加载 + 首次编码约 35s；不预热则首个提问要多等半分钟以上。
+    """
+    def _warm() -> None:
+        try:
+            from src.knowledge.vector_store import get_vector_store
+            from src.knowledge.kb import get_kb_store
+
+            get_vector_store().warmup()
+            get_kb_store().warmup()
+            logger.info("Embedding encoders warm (paper store + KB store)")
+        except Exception as e:  # 预热失败不影响服务，首次使用时仍会懒加载
+            logger.warning("Embedding warmup skipped: %s", e)
+
+    await asyncio.to_thread(_warm)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     logger.info("研析通 v2.0 starting on %s:%s", settings.app.host, settings.app.port)
     setup_tracing()
+    asyncio.create_task(_warmup_encoders())
     yield
     from src.auth.store import close_auth_store
     await close_auth_store()

@@ -1,15 +1,30 @@
 <script setup lang="ts">
-// 文献与引用：文献计数 + 引用链（结论 → 证据）+ 平均置信度
-import { computed } from 'vue'
+// 文献与引用：三页签 —— 引用链（结论 → 证据）/ 文献矩阵（结构化抽取）/ 矛盾与空白
+// 统计卡与页签共同消费 session store（会话状态、citation-chain、matrix/conflicts/gaps 端点）
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSessionStore } from '@/stores/session'
+import LiteratureMatrix from '@/components/workbench/LiteratureMatrix.vue'
+import LiteratureInsights from '@/components/workbench/LiteratureInsights.vue'
 
 const store = useSessionStore()
 const router = useRouter()
 
+const activeTab = ref('chain')
+
 const claims = computed(() => store.normalizedClaims)
 
 const totalEvidence = computed(() => claims.value.reduce((sum, c) => sum + c.citations.length, 0))
+
+const kbDocCount = computed(() => {
+  const names = new Set<string>()
+  for (const c of claims.value) {
+    for (const cit of c.citations) {
+      if (cit.kind === 'knowledge' && cit.filename) names.add(cit.filename)
+    }
+  }
+  return names.size
+})
 
 function confidenceTone(v: number): string {
   if (v >= 0.7) return 'ok'
@@ -18,8 +33,16 @@ function confidenceTone(v: number): string {
 }
 
 async function reload(): Promise<void> {
-  await Promise.all([store.refreshStatus(), store.loadCitationChain()])
+  await Promise.all([
+    store.refreshStatus(),
+    store.loadCitationChain(),
+    store.loadLiteratureInsights(),
+  ])
 }
+
+onMounted(() => {
+  if (store.hasSession) void store.loadLiteratureInsights()
+})
 </script>
 
 <template>
@@ -29,7 +52,7 @@ async function reload(): Promise<void> {
         <span class="eyebrow page-kicker">LITERATURE / CITATION CHAIN</span>
         <h1 class="page-title">文献与引用</h1>
         <p class="page-desc">
-          文献数量取自会话状态，引用链来自后端 citation-chain 接口，逐条展示「结论 → 证据」的支撑关系与置信度。
+          文献数量取自会话状态，引用链来自后端 citation-chain 接口；文献矩阵与矛盾/空白来自结构化抽取分析结果。
         </p>
       </div>
       <div class="page-actions">
@@ -53,7 +76,7 @@ async function reload(): Promise<void> {
         <div class="stat">
           <span class="stat-label">引用链结论</span>
           <span class="stat-value">{{ claims.length }}<span class="stat-unit">条</span></span>
-          <span class="stat-hint">共 {{ totalEvidence }} 条证据</span>
+          <span class="stat-hint">共 {{ totalEvidence }} 条证据<template v-if="kbDocCount"> · 含知识库 {{ kbDocCount }} 篇</template></span>
         </div>
         <div class="stat">
           <span class="stat-label">平均置信度</span>
@@ -62,53 +85,73 @@ async function reload(): Promise<void> {
         </div>
       </div>
 
-      <section class="panel">
-        <header class="panel-head">
-          <span class="panel-title serif">结论 → 证据</span>
-          <span class="panel-sub">{{ claims.length }} CLAIMS</span>
-        </header>
-        <div class="panel-body">
-          <div v-if="claims.length" class="claim-list">
-            <article v-for="(c, i) in claims" :key="i" class="claim">
-              <div class="claim-head">
-                <span class="claim-idx mono">{{ String(i + 1).padStart(2, '0') }}</span>
-                <p class="claim-text">{{ c.text }}</p>
-              </div>
-              <div class="claim-conf">
-                <div class="bar">
-                  <div
-                    class="bar-fill"
-                    :class="confidenceTone(c.confidence)"
-                    :style="{ width: `${Math.min(100, c.confidence * 100)}%` }"
-                  />
-                </div>
-                <span class="mono conf-val">{{ (c.confidence * 100).toFixed(0) }}%</span>
-              </div>
+      <el-tabs v-model="activeTab" class="lit-tabs">
+        <el-tab-pane label="引用链" name="chain">
+          <section class="panel">
+            <header class="panel-head">
+              <span class="panel-title serif">结论 → 证据</span>
+              <span class="panel-sub">{{ claims.length }} CLAIMS</span>
+            </header>
+            <div class="panel-body">
+              <div v-if="claims.length" class="claim-list">
+                <article v-for="(c, i) in claims" :key="i" class="claim">
+                  <div class="claim-head">
+                    <span class="claim-idx mono">{{ String(i + 1).padStart(2, '0') }}</span>
+                    <p class="claim-text">{{ c.text }}</p>
+                  </div>
+                  <div class="claim-conf">
+                    <div class="bar">
+                      <div
+                        class="bar-fill"
+                        :class="confidenceTone(c.confidence)"
+                        :style="{ width: `${Math.min(100, c.confidence * 100)}%` }"
+                      />
+                    </div>
+                    <span class="mono conf-val">{{ (c.confidence * 100).toFixed(0) }}%</span>
+                  </div>
 
-              <div v-if="c.citations.length" class="evidence">
-                <div class="eyebrow ev-label">支撑证据 {{ c.citations.length }}</div>
-                <ul class="ev-list">
-                  <li v-for="(cit, j) in c.citations" :key="j">
-                    <a v-if="cit.url" :href="cit.url" target="_blank" rel="noopener noreferrer">{{ cit.title }}</a>
-                    <span v-else>{{ cit.title }}</span>
-                    <span class="ev-meta mono">
-                      {{ (cit.authors || []).slice(0, 2).join('、') || '作者未标注' }}
-                      <template v-if="cit.year"> · {{ cit.year }}</template>
-                      <template v-if="cit.source"> · {{ cit.source }}</template>
-                    </span>
-                  </li>
-                </ul>
+                  <div v-if="c.citations.length" class="evidence">
+                    <div class="eyebrow ev-label">支撑证据 {{ c.citations.length }}</div>
+                    <ul class="ev-list">
+                      <li v-for="(cit, j) in c.citations" :key="j">
+                        <a v-if="cit.url" :href="cit.url" target="_blank" rel="noopener noreferrer">{{ cit.title }}</a>
+                        <span v-else>{{ cit.title }}</span>
+                        <span class="ev-meta mono">
+                          {{ (cit.authors || []).slice(0, 2).join('、') || '作者未标注' }}
+                          <template v-if="cit.year"> · {{ cit.year }}</template>
+                          <template v-if="cit.source"> · {{ cit.source }}</template>
+                        </span>
+                      </li>
+                    </ul>
+                  </div>
+                  <div v-else class="no-evidence">该结论未附带可解析的证据条目</div>
+                </article>
               </div>
-              <div v-else class="no-evidence">该结论未附带可解析的证据条目</div>
-            </article>
-          </div>
-          <div v-else class="empty">
-            <span class="empty-icon mono">∅</span>
-            <span>引用链为空</span>
-            <span class="hint-line">后端会随问答逐步累积 citation_chain，先进行一次提问后再查看。</span>
-          </div>
-        </div>
-      </section>
+              <div v-else class="empty">
+                <span class="empty-icon mono">∅</span>
+                <span>引用链为空</span>
+                <span class="hint-line">后端会随问答逐步累积 citation_chain，先进行一次提问后再查看。</span>
+              </div>
+            </div>
+          </section>
+        </el-tab-pane>
+
+        <el-tab-pane name="matrix">
+          <template #label>
+            文献矩阵
+            <span class="tab-badge mono">{{ store.matrixRows.length }}</span>
+          </template>
+          <LiteratureMatrix />
+        </el-tab-pane>
+
+        <el-tab-pane name="insights">
+          <template #label>
+            矛盾与空白
+            <span class="tab-badge mono">{{ store.conflicts.length + store.researchGaps.length }}</span>
+          </template>
+          <LiteratureInsights />
+        </el-tab-pane>
+      </el-tabs>
     </div>
   </div>
 </template>
@@ -117,6 +160,27 @@ async function reload(): Promise<void> {
 .big-empty {
   padding: 64px 20px;
   gap: 14px;
+}
+
+.lit-tabs :deep(.el-tabs__header) {
+  margin-bottom: 18px;
+}
+
+.lit-tabs :deep(.el-tabs__item) {
+  font-size: 13px;
+  letter-spacing: 0.04em;
+}
+
+.tab-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--text-2);
+  background: var(--ink-750);
+  border: 1px solid var(--hair-soft);
 }
 
 .claim-list {

@@ -92,7 +92,7 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["agents*", "api*", "core*", "knowledge*", "observability*", "safety*", "tools*", "workflows*"]
+include = ["agents*", "analysis*", "api*", "core*", "knowledge*", "mcp_servers*", "observability*", "safety*", "tools*", "workflows*"]
 
 # --- Tool configuration ------------------------------------------------------
 [tool.pytest.ini_options]

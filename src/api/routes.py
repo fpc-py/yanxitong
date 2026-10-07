@@ -1,8 +1,8 @@
 """FastAPI routes v3.0 — full 5-link chain: find→read→compute→write→review."""
 
-import uuid, os, logging
+import uuid, os, logging, hashlib
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request, Response
 from pathlib import Path
 
 from src.api.schemas import (
@@ -15,10 +15,21 @@ from src.api.schemas import (
 from src.api.deps import Identity, consume_question_quota, get_identity
 from src.api.auth_routes import router as auth_router
 from src.api import session_store
+from src.core.config import get_settings
 from src.workflows.state import create_initial_state
 from src.workflows.supervisor_graph import get_research_app
 from src.workflows import tracing
-from src.knowledge.kb import add_file as kb_add_file, list_files as kb_list_files, remove_file as kb_remove_file, get_kb_store
+from src.knowledge.kb import (
+    add_chunks as kb_add_chunks,
+    find_by_hash as kb_find_by_hash,
+    find_chunk as kb_find_chunk,
+    get_kb_store,
+    list_files as kb_list_files,
+    remove_file as kb_remove_file,
+)
+from src.knowledge.kb_ner import index_chunks as kb_index_chunks
+from src.analysis.literature_analysis import build_matrix, matrix_to_csv
+from src.tools.pdf_ingest import ParsedBlock, ParsedDoc, chunk_parsed_doc, parse_pdf
 from src.tools.sandbox import get_sandbox, DockerSandbox
 from src.observability import metrics as metrics_mod
 
@@ -260,6 +271,35 @@ async def get_citation_chain(session_id: str, request: Request):
     return CitationChainResponse(session_id=session_id, claims=chain, average_confidence=avg_conf)
 
 
+@router.get("/session/{session_id}/literature/matrix")
+async def get_literature_matrix(session_id: str, request: Request, format: str = "json"):
+    """文献矩阵（N×M 六字段对比表）；format=csv 时导出带 BOM 的 CSV（Excel 中文不乱码）。"""
+    identity = await get_identity(request)
+    state = _get_owned_state(session_id, identity)
+    rows = build_matrix(state.get("literature_results", []))
+    if format == "csv":
+        return Response(
+            content=matrix_to_csv(rows),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="literature_matrix_{session_id[:8]}.csv"'},
+        )
+    return {"session_id": session_id, "count": len(rows), "rows": rows}
+
+
+@router.get("/session/{session_id}/literature/conflicts")
+async def get_literature_conflicts(session_id: str, request: Request):
+    identity = await get_identity(request)
+    state = _get_owned_state(session_id, identity)
+    return {"session_id": session_id, "conflicts": state.get("literature_conflicts", [])}
+
+
+@router.get("/session/{session_id}/literature/research-gaps")
+async def get_research_gaps(session_id: str, request: Request):
+    identity = await get_identity(request)
+    state = _get_owned_state(session_id, identity)
+    return {"session_id": session_id, "gaps": state.get("research_gaps", [])}
+
+
 @router.get("/sessions", response_model=list[SessionListItem])
 async def list_sessions(request: Request):
     """按创建时间倒序返回「当前身份」的会话摘要（会话按用户隔离）。"""
@@ -361,23 +401,19 @@ async def metrics_summary():
     )
 
 
-def _extract_pdf(data: bytes) -> str:
-    try:
-        import io
-        from pypdf import PdfReader
-        reader = PdfReader(io.BytesIO(data))
-        return "\n".join((page.extract_text() or "") for page in reader.pages)
-    except Exception:
-        raise HTTPException(status_code=400, detail="PDF 解析库不可用或文件损坏，请改用 .txt / .md")
-
-
 @router.post("/knowledge/upload", response_model=KnowledgeUploadResult)
-async def upload_knowledge(request: Request, file: UploadFile = File(...)):
-    """上传文档入库（txt/md 直接解析；pdf 需 pypdf），分块嵌入到知识库 FAISS 索引。
+async def upload_knowledge(request: Request, file: UploadFile = File(...), library: str = Form("personal")):
+    """上传文档入库：PDF 走两级解析链（PyMuPDF → OCR），txt/md 直接解析。
 
-    文档记录上传者身份，列表/删除仅对上传者可见（用户间知识库隔离）。
+    library=team 需登录（课题组共享，全员可检索）；personal 仅上传者可见。
+    相同内容（sha256）重复上传直接返回 deduped，不重复入库。
     """
     identity = await get_identity(request)
+    if library not in ("team", "personal"):
+        raise HTTPException(status_code=400, detail="library 仅支持 team / personal")
+    if library == "team" and identity.is_anonymous:
+        raise HTTPException(status_code=403, detail={"code": "login_required", "message": "共享库需要登录后上传"})
+    settings = get_settings()
     filename = Path(file.filename).name if file.filename else "unnamed"
     suffix = Path(filename).suffix.lower()
     if suffix not in (".txt", ".md", ".pdf"):
@@ -385,14 +421,47 @@ async def upload_knowledge(request: Request, file: UploadFile = File(...)):
     content = await file.read()
     if not content or not content.strip():
         raise HTTPException(status_code=400, detail="文件内容为空")
-    text = content.decode("utf-8", errors="replace") if suffix != ".pdf" else _extract_pdf(content)
-    text = (text or "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="未能从文件中提取文本")
-    added = kb_add_file(filename, text, owner=identity.label)
+    if len(content) > settings.kb.max_upload_mb * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=f"文件超过 {settings.kb.max_upload_mb}MB 上限")
+
+    content_hash = hashlib.sha256(content).hexdigest()
+    if kb_find_by_hash(library, identity.label, content_hash):
+        return KnowledgeUploadResult(
+            filename=filename, added=0, total_docs=len(get_kb_store()),
+            library=library, parser_used="dedup", deduped=True, uploader=identity.label,
+        )
+
+    pages, ocr_used = 0, False
+    if suffix == ".pdf":
+        doc = await parse_pdf(content, filename)
+        if not doc.full_text.strip():
+            raise HTTPException(status_code=400, detail="PDF 未提取到文本（加密或损坏文件？），可尝试重新导出")
+        pages, ocr_used = doc.pages, doc.ocr_used
+    else:
+        text = content.decode("utf-8", errors="replace").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="未能从文件中提取文本")
+        doc = ParsedDoc(
+            full_text=text,
+            blocks=[ParsedBlock(text=text, page=0, char_start=0, char_end=len(text))],
+            pages=0,
+            parser_used="text",
+        )
+    chunks = chunk_parsed_doc(doc)
+
+    added = kb_add_chunks(filename, chunks, library=library, owner=identity.label, content_hash=content_hash)
     if added == 0:
-        raise HTTPException(status_code=400, detail="文本过短，未形成可检索块")
-    return KnowledgeUploadResult(filename=filename, added=added, total_docs=len(get_kb_store()))
+        raise HTTPException(status_code=400, detail="文本过短或与库中已有内容完全重复，未形成可检索块")
+    try:
+        ner = await kb_index_chunks(chunks, library=library, owner=identity.label, filename=filename)
+        logger.info("KB 图谱写入 %s: %s", filename, ner)
+    except Exception as exc:  # NER 失败不影响入库
+        logger.warning("KB NER 降级: %s", exc)
+    return KnowledgeUploadResult(
+        filename=filename, added=added, total_docs=len(get_kb_store()),
+        library=library, parser_used=doc.parser_used, pages=pages, chunks=added,
+        ocr_used=ocr_used, deduped=False, uploader=identity.label,
+    )
 
 
 @router.get("/knowledge/files", response_model=list[KnowledgeFileItem])
@@ -401,10 +470,22 @@ async def list_knowledge_files(request: Request):
     return [KnowledgeFileItem(**f) for f in kb_list_files(owner=identity.label)]
 
 
-@router.delete("/knowledge/file/{filename}")
-async def delete_knowledge_file(filename: str, request: Request):
+@router.get("/knowledge/chunk")
+async def get_knowledge_chunk(filename: str, chunk_hash: str, request: Request):
+    """按块哈希取块正文及前后各一块（引用溯源预览），仅限有权访问的库。"""
     identity = await get_identity(request)
-    removed = kb_remove_file(filename, owner=identity.label)
+    chunk = kb_find_chunk(owner=identity.label, filename=filename, chunk_hash=chunk_hash)
+    if chunk is None:
+        raise HTTPException(status_code=404, detail="未找到该知识块")
+    return chunk
+
+
+@router.delete("/knowledge/file/{filename}")
+async def delete_knowledge_file(filename: str, request: Request, library: str = "personal"):
+    identity = await get_identity(request)
+    if library not in ("team", "personal"):
+        raise HTTPException(status_code=400, detail="library 仅支持 team / personal")
+    removed = kb_remove_file(filename, library=library, owner=identity.label)
     if removed == 0:
         raise HTTPException(status_code=404, detail=f"知识库中没有 {filename}")
     return {"ok": True, "removed": removed}

@@ -1,18 +1,25 @@
 # =============================================================================
 # 研析通 (YanXiTong) v2.0 — central runtime configuration
+#
+# 生效优先级（低 → 高）：代码默认值 < 本文件 < .env < 真实环境变量。
+# 注意：键名必须与 src/core/config.py 中对应 Config 类的字段完全一致才会生效
+# （所有 block 均为 extra="ignore"，名字不匹配的键会被静默忽略）。
 # Secrets (API keys / passwords) are injected via environment variables,
 # never stored in this file. See docker-compose.yml for wiring.
 # =============================================================================
 
 app:
-  name: yanxitong
-  version: "2.0.0"
-  env: dev                      # dev | staging | prod
+  name: yanxitong                # 文档用途（无对应字段）
+  version: "2.0.0"               # 文档用途（无对应字段）
+  env: dev                       # 文档用途（无对应字段）
   host: 0.0.0.0
   port: 8001
   log_level: info
 
 # --- LLM: model routing table --------------------------------------------------
+# 生效字段仅 model 名 / temperature / max_tokens / dashscope_api_key；
+# provider、base_url、default、routing 目前为文档说明（base_url 在
+# src/core/llm_factory.py 中按 DashScope 兼容端点硬编码）。
 llm:
   provider: dashscope            # OpenAI-compatible endpoint of Alibaba Cloud
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -36,33 +43,45 @@ llm:
       temperature: 0.5
       max_tokens: 8192
 
-# --- Retrieval (hybrid RAG) -----------------------------------------------------
+# --- Retrieval: 三源（arXiv / Semantic Scholar / OpenAlex）+ 向量索引 ------------
 retriever:
-  # 本地已下载的 BGE-M3 模型目录（对应 RetrieverConfig.embedding_model 字段）
+  # 本地已下载的 BGE-M3 模型目录（RetrieverConfig.embedding_model）
   embedding_model: d:/aafpc/yanxitong/models/models/BAAI--bge-m3/snapshots/master
-  sources:
-    arxiv:
-      max_results: 20
-      timeout_seconds: 15
-    semantic_scholar:
-      max_results: 20
-      timeout_seconds: 15
-  embedding:
-    model: BAAI/bge-m3           # BGE-M3
-    dim: 1024
-    normalize: true
-    batch_size: 32
-  vector_store:
-    backend: faiss
-    index_path: data/faiss
-    top_k: 8
-  hybrid:
-    vector_weight: 0.7
-    bm25_weight: 0.3
-    rerank_top_k: 5
+  vector_dim: 1024
+  top_k: 8                       # GraphRAG 融合检索返回条数
+  index_path: data/faiss         # 论文 FAISS 索引目录（index.faiss + docs.json）
+  index_max_papers: 20           # 每轮问答最多编码入库的论文数（CPU 上 BGE 编码是链路最慢段）
+  arxiv_max_results: 20
+  semantic_scholar_max_results: 20
+  openalex_max_results: 20
+  openalex_mailto: ""            # 可选：填邮箱进入 OpenAlex polite pool
+  openalex_api_key: ""           # 可选：免费注册可提升额度；留空走匿名额度
+
+# --- MCP layer for paper sources -----------------------------------------------
+mcp:
+  transport: memory              # memory（进程内 FastMCP，默认，最稳）| stdio（子进程）
+  server_timeout_seconds: 30
+
+# --- Per-paper structured extraction budget --------------------------------------
+extraction:
+  max_papers: 25                 # 每次检索对相关度靠前的 N 篇做 6 字段抽取
+  concurrency: 5                 # 并发 LLM 抽取上限
+
+# --- PDF ingestion chain: PyMuPDF(主) -> OCR(扫描件/低质量兜底) -------------------
+pdf:
+  ocr_enabled: true
+  ocr_max_pages: 20
+  min_chars_per_page: 100        # 低于该密度或乱码率过高视为解析质量差，触发 OCR
+
+# --- User-built knowledge base（共享/私有双区） ------------------------------------
+kb:
+  max_upload_mb: 20
+  chunk_size: 800
+  chunk_overlap: 100
+  ner_max_chunks: 5              # 每篇上传文档抽实体所用的前置块数
 
 # --- Knowledge graph construction -------------------------------------------------
-kg_builder:
+kg:
   entity_types:
     - ResearchProblem
     - Method
@@ -84,32 +103,24 @@ kg_builder:
     - EXTENDS
     - CONTRADICTS
   max_entities_per_doc: 60
-  batch_size: 16
-  dedup_similarity: 0.95
 
 # --- Sandboxed code execution (data analyst agent) ---------------------------------
 sandbox:
   image: yanxitong-sandbox:2.0
   memory_limit: 512m
   cpu_limit: 1.0
-  timeout_seconds: 30
-  network: disabled
-  workspace_mount: /workspace
-  max_output_bytes: 262144       # 256 KB stdout cap
+  timeout: 30
+  network_disabled: true
 
 # --- Answer safety / quality gates --------------------------------------------------
 safety:
   confidence_threshold: 0.6
   self_consistency_samples: 3
-  require_citations: true
-  refuse_below_threshold: true
 
 # --- Semantic answer cache ------------------------------------------------------------
 cache:
-  backend: redis
-  ttl_seconds: 3600
+  ttl: 3600
   similarity_threshold: 0.92
-  namespace: "yxt:cache:"
 
 # --- Accounts, tokens and anonymous trial quota ---------------------------------------
 # 用户/令牌/匿名配额存于 MySQL（docker compose up -d mysql 即可，宿主端口 3309）。
@@ -129,13 +140,16 @@ mysql:
   password: yanxitong           # 生产环境请用 MYSQL_PASSWORD 环境变量覆盖
   database: yanxitong
 
+redis:
+  url: redis://127.0.0.1:6380/0  # compose 内 app 服务用 REDIS_URL=redis://redis:6379 覆盖
+  # 宿主 6380 才是本项目的 redis 容器；6379 被本机其他项目占用。
+  # Redis 不可达时语义缓存自动降级为进程内字典，不阻塞问答。
+
 # --- API rate limiting ------------------------------------------------------------------
 rate_limit:
   requests_per_minute: 60
-  burst: 10
-  key_prefix: "yxt:ratelimit:"
 
-# --- Observability ------------------------------------------------------------------------
+# --- Observability（文档用途：对应代码直接读环境变量，暂不读本块） -------------------------
 observability:
   tracing:
     enabled: true

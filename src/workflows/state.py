@@ -47,7 +47,7 @@ class PaperSummary:
     year: int = 0
     abstract: str = ""
     url: str = ""
-    source: str = "arxiv"       # arxiv | semantic_scholar
+    source: str = "arxiv"           # arxiv | semantic_scholar | openalex | knowledge
     doi: str = ""
     citations_count: int = 0
     key_findings: list[str] = field(default_factory=list)
@@ -55,6 +55,9 @@ class PaperSummary:
     datasets: list[str] = field(default_factory=list)
     metrics: dict[str, str] = field(default_factory=dict)
     full_text_snippet: str = ""
+    relevance_score: int = 0        # 1-6 from enrichment; 0 = not assessed.
+    relevance_reason: str = ""
+    enrichment: dict[str, Any] = field(default_factory=dict)  # six fields + evidence.
 
 
 @dataclass
@@ -114,6 +117,8 @@ class ResearchState(TypedDict):
 
     # --- Phase outputs ----------------------------------------------------------
     literature_results: list[dict[str, Any]]       # PaperSummary as dicts.
+    literature_conflicts: list[dict[str, Any]]      # Contradiction pairs (claim_a vs claim_b).
+    research_gaps: list[dict[str, Any]]             # Identified research gaps.
     kg_snapshot: Optional[str]                      # JSON string of graph subgraph.
     experiment_results: Optional[dict[str, Any]]    # ExperimentReport as a dict.
     writing_draft: Optional[str]
@@ -166,6 +171,8 @@ def create_initial_state(
         task_queue=[],
         completed_tasks=[],
         literature_results=[],
+        literature_conflicts=[],
+        research_gaps=[],
         kg_snapshot=None,
         experiment_results=None,
         writing_draft=None,

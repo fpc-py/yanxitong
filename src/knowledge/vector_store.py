@@ -16,10 +16,10 @@ from src.core.config import get_settings
 class VectorStore:
     """FAISS-backed vector store using BGE-M3 embeddings."""
 
-    def __init__(self, dim: Optional[int] = None, index_path: Optional[str] = None):
+    def __init__(self, dim: Optional[int] = None, index_path: Optional[str] = None, encoder=None):
         settings = get_settings()
         self.dim = dim or settings.retriever.vector_dim
-        self.model = SentenceTransformer(settings.retriever.embedding_model)
+        self.model = encoder if encoder is not None else SentenceTransformer(settings.retriever.embedding_model)
         self._lock = threading.Lock()
         self._documents: dict[int, dict] = {}  # faiss_id -> doc
         self._next_id = 0
@@ -35,6 +35,14 @@ class VectorStore:
             texts, normalize_embeddings=True, show_progress_bar=False
         )
         return np.array(embeddings).astype(np.float32)
+
+    def warmup(self) -> None:
+        """Run one throwaway embedding to pay lazy-load/compile costs up front.
+
+        Called from application startup on a worker thread so the first user
+        question does not absorb BGE-M3's ~35s cold start.
+        """
+        self._embed(["warmup"])
 
     def add_documents(self, docs: list[dict]) -> list[int]:
         """Add documents to the index. Each doc needs 'text' field for embedding.
@@ -54,18 +62,26 @@ class VectorStore:
             self._next_id = start_id + len(docs)
         return ids
 
-    def search(self, query: str, top_k: int = 10, scope: Optional[str] = None) -> list[dict]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 10,
+        scope: Optional[str] = None,
+        scopes: Optional[list[str]] = None,
+    ) -> list[dict]:
         """Search for documents similar to query. Returns docs with scores.
 
-        When ``scope`` is given (a session id), only documents indexed under
-        that scope are returned — this is what keeps one research question's
+        When ``scope`` (a session id) or ``scopes`` (e.g. the KB zones
+        ``["kb:team", "kb:user:3"]``) are given, only documents indexed under
+        those scopes are returned — this is what keeps one research question's
         corpus from leaking into another's RAG context. FAISS cannot filter
         natively, so a wider candidate window is fetched and post-filtered.
         """
         if self.index.ntotal == 0:
             return []
+        wanted = set(scopes) if scopes else ({scope} if scope else None)
         query_embedding = self._embed([query])
-        if scope:
+        if wanted:
             k = min(self.index.ntotal, max(top_k * 8, 64))
         else:
             k = min(top_k, self.index.ntotal)
@@ -76,7 +92,7 @@ class VectorStore:
             if idx < 0 or idx not in self._documents:
                 continue
             doc = self._documents[idx]
-            if scope and doc.get("scope") != scope:
+            if wanted and doc.get("scope") not in wanted:
                 continue
             doc = dict(doc)
             doc["similarity"] = float(score)

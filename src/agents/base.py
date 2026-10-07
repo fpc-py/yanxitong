@@ -15,7 +15,9 @@ provides:
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -33,7 +35,33 @@ __all__ = [
     "AuditEntry",
     "AgentResult",
     "BaseAgent",
+    "parse_llm_json",
 ]
+
+
+def parse_llm_json(response: str, raise_on_error: bool = False) -> dict:
+    """Parse an LLM JSON response, tolerating code fences and surrounding prose.
+
+    Returns ``{}`` for unparsable payloads unless ``raise_on_error`` is set.
+    """
+    text = (response or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end <= start:
+            if raise_on_error:
+                raise
+            return {}
+        try:
+            data = json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            if raise_on_error:
+                raise
+            return {}
+    return data if isinstance(data, dict) else {}
 
 
 class CircuitState(Enum):
