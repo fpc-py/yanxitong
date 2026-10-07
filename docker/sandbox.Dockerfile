@@ -1,11 +1,11 @@
 # =============================================================================
 # 研析通 v2.0 — sandboxed code-execution image (data analyst agent)
 # Build (from project root):
-#   docker build -f docker/sandbox.Dockerfile -t yanxitong-sandbox:2.0 docker
+#   docker build -f docker/sandbox.Dockerfile -t yanxitong-sandbox:2.1 docker
 # Execution MUST be network-isolated and resource-capped, e.g.:
 #   docker run --rm --network none --memory 512m --cpus 1.0 \
 #       --read-only --pids-limit 128 -v ./workdir:/workspace \
-#       yanxitong-sandbox:2.0 python /workspace/script.py
+#       yanxitong-sandbox:2.1 python /workspace/script.py
 # =============================================================================
 FROM python:3.12-slim
 
@@ -32,7 +32,8 @@ RUN pip install --no-cache-dir \
         matplotlib \
         seaborn \
         scikit-learn \
-        openpyxl
+        openpyxl \
+        pyarrow
 
 
 RUN apt-get update \

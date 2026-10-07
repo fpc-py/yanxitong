@@ -1,13 +1,23 @@
 <script setup lang="ts">
-// 数据分析：上传 CSV → 填写分析意图 → 调用后端分析 → 展示结果与历史记录
-import { computed, ref } from 'vue'
+// 数据分析：上传数据 → 自动画像 → 填写分析意图 → 调用后端流水线 → 展示报告与 Dossier（画像/规划/知识引用/校验/产出包）
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import MarkdownView from '@/components/MarkdownView.vue'
 import ResultCard from '@/components/ResultCard.vue'
+import AnalysisDossier from '@/components/analysis/AnalysisDossier.vue'
 import api, { extractErrorMessage } from '@/api/client'
 import { useSessionStore } from '@/stores/session'
-import type { FigureItem, UploadResponse } from '@/api/types'
+import type {
+  AnalysisRun,
+  AnalysisRunManifest,
+  DataProfile,
+  FigureItem,
+  KnowledgeRecall,
+  TaskPlan,
+  UploadResponse,
+  ValidationReport,
+} from '@/api/types'
 
 const store = useSessionStore()
 const router = useRouter()
@@ -15,12 +25,21 @@ const router = useRouter()
 const fileInput = ref<HTMLInputElement | null>(null)
 const uploading = ref(false)
 const uploadResult = ref<UploadResponse | null>(null)
+const profiling = ref(false)
 
 const intent = ref('请对该数据集做描述性统计与相关性分析，并给出主要发现与可视化建议。')
 const answer = ref('')
 const figures = ref<FigureItem[]>([])
 const confidence = ref(0)
 const elapsed = ref<number | null>(null)
+
+// Dossier 各区块（由画像端点与 analyze 响应填充）
+const profile = ref<DataProfile | null>(null)
+const plan = ref<TaskPlan | null>(null)
+const recall = ref<KnowledgeRecall | null>(null)
+const validation = ref<ValidationReport | null>(null)
+const run = ref<AnalysisRun | null>(null)
+const runs = ref<AnalysisRunManifest[]>([])
 
 interface RecordItem {
   at: string
@@ -34,6 +53,15 @@ const fileLabel = computed(() => {
   if (!uploadResult.value) return ''
   const kb = uploadResult.value.size_bytes / 1024
   return kb >= 1024 ? `${(kb / 1024).toFixed(2)} MB` : `${kb.toFixed(1)} KB`
+})
+
+onMounted(async () => {
+  if (!store.sessionId) return
+  try {
+    runs.value = await api.getAnalysisRuns(store.sessionId)
+  } catch {
+    /* 无历史产出包时静默 */
+  }
 })
 
 function pickFile(): void {
@@ -52,6 +80,19 @@ async function onFileChange(e: Event): Promise<void> {
     uploadResult.value = res
     ElMessage.success(`已上传：${res.filename}`)
     await store.refreshStatus()
+    // 上传成功后自动生成画像（沙箱不可用时后端返回 degraded，不影响后续分析）
+    profiling.value = true
+    try {
+      profile.value = await api.getDataProfile(store.sessionId)
+      if (profile.value.degraded) {
+        ElMessage.warning(`画像降级：${profile.value.error || '沙箱不可用'}`)
+      }
+    } catch (err) {
+      profile.value = null
+      ElMessage.warning(`画像生成失败：${extractErrorMessage(err)}`)
+    } finally {
+      profiling.value = false
+    }
   } catch (err) {
     ElMessage.error(extractErrorMessage(err))
   } finally {
@@ -71,6 +112,11 @@ async function runAnalyze(): Promise<void> {
   figures.value = res.figures ?? []
   confidence.value = res.confidence
   elapsed.value = store.lastLatencyMs
+  profile.value = res.profile ?? profile.value
+  plan.value = res.task_plan ?? null
+  recall.value = res.knowledge_recall ?? null
+  validation.value = res.validation ?? null
+  run.value = res.analysis_run ?? null
   records.value.unshift({
     at: new Date().toLocaleTimeString('zh-CN'),
     query: q,
@@ -78,6 +124,26 @@ async function runAnalyze(): Promise<void> {
     elapsedMs: store.lastLatencyMs ?? 0,
   })
   await store.refreshStatus()
+  try {
+    runs.value = await api.getAnalysisRuns(store.sessionId)
+  } catch {
+    /* 产出包清单刷新失败不阻塞 */
+  }
+}
+
+async function downloadRun(runId: string): Promise<void> {
+  if (!store.sessionId) return
+  try {
+    const blob = await api.downloadAnalysisPackage(store.sessionId, runId)
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `analysis_${runId}.zip`
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (err) {
+    ElMessage.error(extractErrorMessage(err))
+  }
 }
 </script>
 
@@ -88,7 +154,7 @@ async function runAnalyze(): Promise<void> {
         <span class="eyebrow page-kicker">DATA / ANALYZE</span>
         <h1 class="page-title">数据分析</h1>
         <p class="page-desc">
-          先上传数据文件（CSV），再描述分析意图。后端在沙箱中执行计算并返回文本结论，耗时通常较长。
+          上传数据文件后自动生成画像；描述分析意图后，后端执行「画像 → 知识召回 → 代码生成 → 沙箱 → 校验 → 报告」全链路并打包产出（含 Notebook 与出版级图表）。
         </p>
       </div>
       <div class="page-actions">
@@ -113,13 +179,19 @@ async function runAnalyze(): Promise<void> {
             <span class="panel-sub">multipart · field=file</span>
           </header>
           <div class="panel-body">
-            <input ref="fileInput" type="file" accept=".csv,.txt,.xlsx" class="hidden-input" @change="onFileChange" />
+            <input
+              ref="fileInput"
+              type="file"
+              accept=".csv,.txt,.xlsx,.xls,.json,.parquet"
+              class="hidden-input"
+              @change="onFileChange"
+            />
             <div class="dropzone" @click="pickFile">
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M12 16V4M6 10l6-6 6 6M4 20h16" />
               </svg>
-              <span class="dz-title">{{ uploading ? '正在上传…' : '点击选择 CSV 数据文件' }}</span>
-              <span class="dz-hint">支持 .csv / .txt / .xlsx</span>
+              <span class="dz-title">{{ uploading ? '正在上传…' : '点击选择数据文件' }}</span>
+              <span class="dz-hint">支持 .csv / .txt / .xlsx / .xls / .json / .parquet</span>
             </div>
 
             <div v-if="uploadResult" class="file-info">
@@ -128,7 +200,9 @@ async function runAnalyze(): Promise<void> {
                 <span class="mono fmeta">{{ fileLabel }}</span>
               </div>
               <div class="file-path mono">{{ uploadResult.file_path }}</div>
-              <div class="hint-line">{{ uploadResult.message }}</div>
+              <div class="hint-line">
+                {{ profiling ? '正在沙箱内推断 Schema 与数据质量…' : uploadResult.message }}
+              </div>
             </div>
           </div>
         </section>
@@ -158,7 +232,7 @@ async function runAnalyze(): Promise<void> {
           title="分析结果"
           eyebrow="ANALYSIS OUTPUT"
           :loading="store.loading"
-          loading-text="沙箱执行中，正在等待后端返回…"
+          loading-text="流水线执行中：画像 → 知识召回 → 代码生成 → 沙箱 → 校验 → 报告…"
           :error="null"
           :elapsed-ms="elapsed"
         >
@@ -171,37 +245,76 @@ async function runAnalyze(): Promise<void> {
             </figure>
           </div>
         </ResultCard>
+
+        <AnalysisDossier
+          :session-id="store.sessionId ?? ''"
+          :profile="profile"
+          :plan="plan"
+          :recall="recall"
+          :validation="validation"
+          :run="run"
+        />
       </div>
 
-      <!-- 历史记录 -->
-      <section class="panel">
-        <header class="panel-head">
-          <span class="panel-title serif">分析记录</span>
-          <span class="panel-sub">{{ records.length }} RUNS</span>
-        </header>
-        <div class="panel-body">
-          <div class="stat" style="margin-bottom: 14px">
-            <span class="stat-label">最近置信度</span>
-            <span class="stat-value">{{ (confidence * 100).toFixed(0) }}<span class="stat-unit">%</span></span>
-            <span class="stat-hint">confidence_scores.data_analyst</span>
-          </div>
+      <div class="stack">
+        <!-- 历史记录 -->
+        <section class="panel">
+          <header class="panel-head">
+            <span class="panel-title serif">分析记录</span>
+            <span class="panel-sub">{{ records.length }} RUNS</span>
+          </header>
+          <div class="panel-body">
+            <div class="stat" style="margin-bottom: 14px">
+              <span class="stat-label">最近置信度</span>
+              <span class="stat-value">{{ (confidence * 100).toFixed(0) }}<span class="stat-unit">%</span></span>
+              <span class="stat-hint">confidence_scores.data_analyst</span>
+            </div>
 
-          <ul v-if="records.length" class="rec-list">
-            <li v-for="(r, i) in records" :key="i">
-              <div class="rec-head">
-                <span class="mono t">{{ r.at }}</span>
-                <span class="chip">{{ (r.confidence * 100).toFixed(0) }}%</span>
-                <span class="mono t">{{ (r.elapsedMs / 1000).toFixed(1) }}s</span>
-              </div>
-              <p class="rec-query">{{ r.query }}</p>
-            </li>
-          </ul>
-          <div v-else class="empty">
-            <span class="empty-icon mono">∅</span>
-            <span>暂无分析记录</span>
+            <ul v-if="records.length" class="rec-list">
+              <li v-for="(r, i) in records" :key="i">
+                <div class="rec-head">
+                  <span class="mono t">{{ r.at }}</span>
+                  <span class="chip">{{ (r.confidence * 100).toFixed(0) }}%</span>
+                  <span class="mono t">{{ (r.elapsedMs / 1000).toFixed(1) }}s</span>
+                </div>
+                <p class="rec-query">{{ r.query }}</p>
+              </li>
+            </ul>
+            <div v-else class="empty">
+              <span class="empty-icon mono">∅</span>
+              <span>暂无分析记录</span>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+
+        <!-- 产出包（历次 run 的 zip 下载） -->
+        <section class="panel">
+          <header class="panel-head">
+            <span class="panel-title serif">产出包</span>
+            <span class="panel-sub">{{ runs.length }} PACKAGES</span>
+          </header>
+          <div class="panel-body">
+            <ul v-if="runs.length" class="run-list">
+              <li v-for="r in runs" :key="r.run_id">
+                <div class="run-head">
+                  <span class="mono run-id">{{ r.run_id }}</span>
+                  <span v-if="r.degraded" class="chip tiny run-warn">降级</span>
+                  <span class="chip tiny">{{ r.files?.length ?? 0 }} 文件</span>
+                </div>
+                <p class="run-intent">{{ r.intent }}</p>
+                <div class="run-foot">
+                  <span class="mono run-time">{{ (r.created_at || '').slice(0, 19).replace('T', ' ') }}</span>
+                  <el-button size="small" text type="primary" @click="downloadRun(r.run_id)">下载 zip</el-button>
+                </div>
+              </li>
+            </ul>
+            <div v-else class="empty">
+              <span class="empty-icon mono">∅</span>
+              <span>暂无产出包，执行分析后可下载</span>
+            </div>
+          </div>
+        </section>
+      </div>
     </div>
   </div>
 </template>
@@ -372,5 +485,65 @@ async function runAnalyze(): Promise<void> {
   line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.run-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.run-list li {
+  padding: 10px 12px;
+  border: 1px solid var(--hair-soft);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.run-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.run-id {
+  font-size: 10.5px;
+  color: var(--text-3);
+  letter-spacing: 0.04em;
+}
+
+.run-warn {
+  color: var(--amber);
+  border-color: var(--amber);
+}
+
+.run-intent {
+  margin: 5px 0 0;
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.6;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.run-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.run-time {
+  font-size: 10px;
+  color: var(--text-3);
+  letter-spacing: 0.05em;
 }
 </style>

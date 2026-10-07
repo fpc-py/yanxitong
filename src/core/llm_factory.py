@@ -35,7 +35,7 @@ from src.core.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
-ModelRole = Literal["supervisor", "lightweight", "deep_reasoning"]
+ModelRole = Literal["supervisor", "lightweight", "deep_reasoning", "coder"]
 
 #: Approximate list prices in USD per **one million** tokens, as
 #: ``(prompt_price, completion_price)``.  Entries are keyed by model-name
@@ -44,6 +44,7 @@ ModelRole = Literal["supervisor", "lightweight", "deep_reasoning"]
 DEFAULT_PRICING: dict[str, tuple[float, float]] = {
     "qwen-max": (1.6, 6.4),
     "qwen3.8-flash": (0.05, 0.4),
+    "qwen3-coder-flash": (0.3, 1.2),   # 估算值：仅影响成本遥测展示
     "deepseek-v4-pro": (0.27, 1.10),
 }
 
@@ -217,7 +218,7 @@ class LLMRouter:
         if not hasattr(cfg, role):
             raise ValueError(
                 f"Unknown model role {role!r}; expected one of "
-                f"'supervisor', 'lightweight', 'deep_reasoning'."
+                f"'supervisor', 'lightweight', 'deep_reasoning', 'coder'."
             )
 
         cache_key = f"{role}_{kwargs.get('temperature', '')}"
@@ -277,6 +278,11 @@ class LLMRouter:
     def deep_reasoning(self) -> ChatOpenAI:
         """Client for planning/verification (``deepseek-v4-pro`` at temp 0.3 by default)."""
         return self.get_llm("deep_reasoning", temperature=0.3)
+
+    @property
+    def coder(self) -> ChatOpenAI:
+        """Client for Python code generation (``qwen3-coder-flash`` by default)."""
+        return self.get_llm("coder")
 
     # ------------------------------------------------------------------
     # Cost tracking

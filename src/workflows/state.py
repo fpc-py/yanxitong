@@ -144,6 +144,7 @@ class ResearchState(TypedDict):
     # 必须在此声明：LangGraph 只保留 schema 中声明的通道，未声明的键会被丢弃
     # （历史 bug：data_file_path 被丢弃，导致数据分析误判为「无数据」而自己造样本）。
     data_file_path: str
+    data_profile: Optional[dict[str, Any]]           # 沙箱画像（① Schema/质量报告），/profile 端点写入
     writing_section: str
     citation_style: str
 
@@ -191,6 +192,7 @@ def create_initial_state(
         final_response=None,
         error_message=None,
         data_file_path="",
+        data_profile=None,
         writing_section="",
         citation_style="",
     )

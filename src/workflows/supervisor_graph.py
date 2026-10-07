@@ -97,14 +97,31 @@ async def supervisor_node(state: ResearchState) -> ResearchState:
     return state
 
 
+def analysis_answer(exp: dict | None) -> str:
+    """解释报告优先；缺失时逐级回退（stdout → 图表提示 → stderr）。"""
+    exp = exp or {}
+    report = (exp.get("report") or "").strip()
+    stdout = (exp.get("stdout") or "").strip()
+    if report:
+        return report
+    if stdout:
+        return stdout
+    if exp.get("figures"):
+        return "沙箱已执行分析并生成图表，但生成的代码没有输出文字结论。图表见下方。"
+    return (exp.get("stderr") or "").strip() or "分析已执行，但没有可展示的输出。"
+
+
 async def data_analyst_node(state: ResearchState) -> ResearchState:
     agent = DataAnalystAgent()
     result = await agent.execute(state)
     if result.success:
         state["experiment_results"] = result.data
         state["confidence_scores"]["data_analyst"] = result.confidence
+        # 与其他节点一致：/session、/query 的 _build_response 依赖 final_response
+        state["final_response"] = analysis_answer(result.data)
     else:
         state["error_message"] = result.error
+        state["final_response"] = f"Error: {result.error}"
     return state
 
 

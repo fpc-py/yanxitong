@@ -4,12 +4,14 @@
 import axios, { AxiosError, type AxiosInstance } from 'axios'
 import { getAnonId, getToken } from './identity'
 import type {
+  AnalysisRunManifest,
   AuthResponse,
   BibliographyResponse,
   ChunkPreview,
   Citation,
   CitationChainResponse,
   CreateSessionBody,
+  DataProfile,
   HealthResponse,
   KgAuditEntry,
   KgBackfillResult,
@@ -208,6 +210,35 @@ const api = {
       query,
     })
     return data
+  },
+
+  /** 5a. 数据画像（规格①）：沙箱内做格式识别/Schema 推断/质量报告；失败返回 degraded=true */
+  async getDataProfile(sessionId: string): Promise<DataProfile> {
+    const { data } = await http.post<DataProfile>(`/session/${sessionId}/profile`)
+    return data
+  },
+
+  /** 5b. 历次分析运行清单（manifest：文件/阶段耗时/降级与校验状态） */
+  async getAnalysisRuns(sessionId: string): Promise<AnalysisRunManifest[]> {
+    const { data } = await http.get<{ session_id: string; runs: AnalysisRunManifest[] }>(
+      `/session/${sessionId}/analysis/runs`,
+    )
+    return data.runs ?? []
+  },
+
+  /** 5c. 下载产出包 zip（报告/Notebook/图表/清洗数据/环境锁） */
+  async downloadAnalysisPackage(sessionId: string, runId: string): Promise<Blob> {
+    const { data } = await http.get<Blob>(
+      `/session/${sessionId}/analysis/package/${encodeURIComponent(runId)}`,
+      { responseType: 'blob', timeout: 120_000 },
+    )
+    return data
+  },
+
+  /** 5d. 产出包内单个文件下载地址（figures/x.png、pub/x_300dpi.svg 等，相对当前站点） */
+  analysisFileUrl(sessionId: string, runId: string, name: string): string {
+    const encoded = name.split('/').map(encodeURIComponent).join('/')
+    return `/api/session/${sessionId}/analysis/file/${encodeURIComponent(runId)}/${encoded}`
   },
 
   /** 6. 实验设计 */

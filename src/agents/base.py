@@ -285,6 +285,8 @@ class BaseAgent(ABC):
         system_prompt: str = "",
         json_mode: bool = False,
         enable_thinking: bool = True,
+        *,
+        role: str = "",
     ) -> str:
         """Safe LLM call with semantic-cache read-through.
 
@@ -301,6 +303,8 @@ class BaseAgent(ABC):
             enable_thinking: Set False for DashScope reasoning models to skip the
                 hidden chain-of-thought. Otherwise the reasoning can consume the
                 whole token budget and leave the visible answer empty.
+            role: Optional model-role override (e.g. ``"coder"``); empty string
+                keeps the agent's own ``model_role`` (unchanged behaviour).
 
         Returns:
             The model's completion text.
@@ -315,13 +319,23 @@ class BaseAgent(ABC):
         messages.append(HumanMessage(content=prompt))
 
         cache = await get_cache()
-        cache_key = ("json::" if json_mode else "") + ("nothink::" if not enable_thinking else "") + system_prompt + prompt
+        cache_key = (
+            ("role::" + role + "::" if role else "")
+            + ("json::" if json_mode else "")
+            + ("nothink::" if not enable_thinking else "")
+            + system_prompt + prompt
+        )
         cached = await cache.get(cache_key)
         if cached is not None:
-            self._audit("llm_cache_hit", {"prompt_len": len(prompt)})
+            self._audit("llm_cache_hit", {"prompt_len": len(prompt), "role": role or self.model_role})
             return cached
 
-        llm = self.llm
+        if role:
+            from src.core.llm_factory import get_llm
+
+            llm = get_llm(role)
+        else:
+            llm = self.llm
         bind_kwargs: dict[str, Any] = {}
         if json_mode:
             bind_kwargs["response_format"] = {"type": "json_object"}

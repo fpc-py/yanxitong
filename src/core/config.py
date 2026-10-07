@@ -78,6 +78,9 @@ class LLMConfig(_EnvFirstConfig):
     deep_reasoning: str = "deepseek-v4-pro"
     """Strong reasoning model for planning, review and final synthesis."""
 
+    coder: str = "qwen3-coder-flash"
+    """Code-generation model for the data analyst's Python scripts (queue: qwen-coder)."""
+
     temperature: float = 0.1
     """Default sampling temperature for deterministic, factual outputs."""
 
@@ -279,6 +282,24 @@ class SandboxConfig(_EnvFirstConfig):
     """Whether the sandbox container runs without network access."""
 
 
+class AnalysisConfig(_EnvFirstConfig):
+    """Data Analyst pipeline: profiling, knowledge recall and packaging budget."""
+
+    model_config = SettingsConfigDict(env_prefix="ANALYSIS_", populate_by_name=True, extra="ignore")
+
+    max_runs: int = 5
+    """How many packaged analysis runs are kept per session on disk."""
+
+    recall_top_k: int = 6
+    """Chunks retrieved per knowledge library (plotting/methods/journal/textbook)."""
+
+    deep_verify: bool = True
+    """Whether the LLM verification pass (assumptions + narrative consistency) runs."""
+
+    profile_timeout: int = 15
+    """Wall-clock seconds allowed for the in-sandbox profiling script."""
+
+
 class SafetyConfig(_EnvFirstConfig):
     """Thresholds for hallucination guards and self-consistency checks."""
 
@@ -430,6 +451,7 @@ class Settings(BaseSettings):
     pdf: PDFConfig = Field(default_factory=PDFConfig)
     kb: KBConfig = Field(default_factory=KBConfig)
     kg: KGBuilderConfig = Field(default_factory=KGBuilderConfig)
+    analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)

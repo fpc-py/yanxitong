@@ -52,6 +52,7 @@ data/sessions.db
 data/audit.db
 data/faiss/
 data/uploads/
+data/analysis/
 
 # --- IDE / 编辑器 ---------------------------------------------
 .idea/

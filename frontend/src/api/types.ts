@@ -54,6 +54,16 @@ export interface QueryResponse {
   figures?: FigureItem[]
   /** 未登录用户的剩余免费问答次数；已登录或配额服务不可用时为 null */
   quota_remaining?: number | null
+  /** ① 数据画像（/analyze 返回） */
+  profile?: DataProfile | null
+  /** ② 任务规划 */
+  task_plan?: TaskPlan | null
+  /** ③ 知识召回 */
+  knowledge_recall?: KnowledgeRecall | null
+  /** ⑦ 结果验证报告 */
+  validation?: ValidationReport | null
+  /** ⑨ 本次运行的打包信息 */
+  analysis_run?: AnalysisRun | null
 }
 
 /** 上传文件响应 */
@@ -63,6 +73,147 @@ export interface UploadResponse {
   size_bytes: number
   file_path: string
   message: string
+}
+
+/** 数据画像列信息（规格①：Schema 推断 + 质量报告） */
+export interface DataProfileColumn {
+  name: string
+  dtype: string
+  missing: number
+  missing_pct: number
+  unique: number
+  sample?: string
+  min?: number
+  max?: number
+  mean?: number
+  outliers_iqr?: number
+}
+
+/** 数据画像（degraded=true 表示沙箱不可用，仅提示不阻塞） */
+export interface DataProfile {
+  ok: boolean
+  degraded?: boolean
+  error?: string
+  filename?: string
+  format?: string
+  rows?: number
+  cols?: number
+  columns?: DataProfileColumn[]
+  numeric_columns?: string[]
+  categorical_columns?: string[]
+  datetime_columns?: string[]
+  quality?: {
+    duplicates: number
+    duplicate_pct: number
+    issue_count: number
+    issues: { kind: string; column?: string; detail: string }[]
+  }
+  sandbox?: string
+}
+
+/** 任务规划步骤（规格②） */
+export interface TaskPlanStep {
+  id?: number
+  type?: string
+  description?: string
+  depends_on?: number[]
+  output?: string
+}
+
+export interface TaskPlanMethod {
+  name: string
+  why?: string
+  assumptions?: string[]
+  source?: string
+}
+
+export interface TaskPlanTemplate {
+  name: string
+  when?: string
+  params?: string
+  source?: string
+}
+
+/** 任务规划（fallback=true 表示 LLM 规划失败、走启发式单步计划） */
+export interface TaskPlan {
+  intent_summary?: string
+  steps?: TaskPlanStep[]
+  methods?: TaskPlanMethod[]
+  templates?: TaskPlanTemplate[]
+  journal_rules?: string[]
+  fallback?: boolean
+}
+
+/** 知识召回块（规格③） */
+export interface KnowledgeRecallChunk {
+  section: string
+  text: string
+  source: string
+  similarity: number
+}
+
+export interface KnowledgeRecall {
+  query: string
+  libraries: Record<string, { label: string; chunks: KnowledgeRecallChunk[] }>
+  degraded: boolean
+  sources: number
+}
+
+/** 校验条目（规格⑦：确定性 + LLM 两层） */
+export interface ValidationCheck {
+  check: string
+  status: 'ok' | 'warn' | 'fail' | string
+  detail?: string
+  suggestion?: string
+}
+
+export interface ValidationReport {
+  deterministic: { checks: ValidationCheck[]; status: string; issues: number }
+  llm: {
+    assumptions?: { test?: string; assumption?: string; status?: string; note?: string }[]
+    narrative?: { claim?: string; status?: string; note?: string }[]
+    overall?: string
+    comments?: string[]
+  } | null
+  overall: 'pass' | 'warn' | 'fail' | string
+  revision_suggestions: string[]
+}
+
+export interface AnalysisArtifact {
+  name: string
+  size: number
+}
+
+/** 流水线阶段（含耗时与是否降级） */
+export interface AnalysisStage {
+  stage: string
+  ok: boolean
+  ms?: number
+  [key: string]: unknown
+}
+
+/** 本次运行打包信息（规格⑨） */
+export interface AnalysisRun {
+  run_id: string
+  degraded: boolean
+  degrade_reason?: string
+  attempts: number
+  stages: AnalysisStage[]
+  artifacts: AnalysisArtifact[]
+  files?: AnalysisArtifact[]
+  validation_overall?: string
+}
+
+/** 历史运行 manifest（GET /analysis/runs） */
+export interface AnalysisRunManifest {
+  run_id: string
+  session_id: string
+  created_at: string
+  intent: string
+  degraded?: boolean
+  attempts?: number
+  files: AnalysisArtifact[]
+  [key: string]: unknown
 }
 
 /** 会话状态 */

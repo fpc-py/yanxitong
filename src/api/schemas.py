@@ -54,6 +54,26 @@ class QueryResponse(BaseModel):
         None,
         description="三元组幻觉校验报告：{checked, score, states, flags, triples}",
     )
+    profile: Optional[dict] = Field(
+        None,
+        description="数据分析①：数据画像（格式/行列/列Schema/质量报告）；降级时含 degraded",
+    )
+    task_plan: Optional[dict] = Field(
+        None,
+        description="数据分析②：任务规划（步骤/依赖/预期产出 + 推荐方法与绘图模板）",
+    )
+    knowledge_recall: Optional[dict] = Field(
+        None,
+        description="数据分析③：RAG 知识召回（绘图模板/统计方法/期刊规范/教材 证据块）",
+    )
+    validation: Optional[dict] = Field(
+        None,
+        description="数据分析⑦：结果验证报告（确定性检查 + 假设适用性 + 叙述一致性）",
+    )
+    analysis_run: Optional[dict] = Field(
+        None,
+        description="数据分析⑨：产出包元数据（run_id/降级状态/阶段轨迹/产物清单）",
+    )
 
 
 # ---- Auth -------------------------------------------------------------------

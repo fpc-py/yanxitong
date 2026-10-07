@@ -1,6 +1,6 @@
 """Docker-based code execution sandbox + MockSandbox fallback for Phase 2."""
 
-import asyncio, base64, logging, shutil, sys, subprocess, tempfile
+import asyncio, base64, logging, re, shutil, sys, subprocess, tempfile
 from pathlib import Path
 from typing import Optional
 from src.core.config import get_settings
@@ -12,6 +12,26 @@ logger = logging.getLogger(__name__)
 FIGURE_MOUNT = "/output"
 MAX_FIGURES = 4
 MAX_FIGURE_BYTES = 2_000_000
+
+#: 静态环境锁回退（沙箱内 pip freeze 不可用时使用；版本随镜像构建日快照）。
+STATIC_ENV_LOCK = """# yanxitong-sandbox:2.1 (python:3.12-slim)
+pandas
+numpy
+scipy
+matplotlib
+seaborn
+scikit-learn
+openpyxl
+pyarrow
+"""
+
+_SAFE_MOUNT_NAME = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _sanitize_mount_name(name: str, default: str = "data.csv") -> str:
+    """把原始文件名收敛成安全挂载名（仅保留扩展名语义与字符白名单）。"""
+    candidate = _SAFE_MOUNT_NAME.sub("_", Path(name).name).lstrip(".") or default
+    return candidate[:64]
 
 
 def _collect_figures(out_dir: str) -> list[dict]:
@@ -35,6 +55,39 @@ def _collect_figures(out_dir: str) -> list[dict]:
     return figures
 
 
+def _list_artifacts(out_dir: str) -> list[dict]:
+    """列出 /output 下全部产物（递归），供产出打包清单使用。"""
+    artifacts: list[dict] = []
+    try:
+        paths = sorted(Path(out_dir).rglob("*"))
+    except OSError:
+        return artifacts
+    for path in paths:
+        try:
+            if not path.is_file():
+                continue
+            artifacts.append({
+                "name": path.relative_to(out_dir).as_posix(),
+                "size": path.stat().st_size,
+            })
+        except OSError:
+            continue
+    return artifacts
+
+
+def _copy_artifacts(out_dir: str, dest_dir: str) -> None:
+    """把容器产物全量复制到宿主机持久目录（产出包 run 目录）。"""
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    for path in Path(out_dir).rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(out_dir)
+        target = dest / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+
+
 class DockerSandbox:
     """Executes Python code in an isolated Docker container."""
 
@@ -42,6 +95,7 @@ class DockerSandbox:
         self.settings = get_settings()
         self._image = self.settings.sandbox.image
         self._ready = False
+        self._env_lock_cache: Optional[str] = None
 
     async def _image_exists(self) -> bool:
         proc = await asyncio.create_subprocess_exec(
@@ -69,11 +123,18 @@ class DockerSandbox:
                 logger.warning("Sandbox image build warning: %s", stderr.decode())
         self._ready = True
 
-    async def _run_container(self, script_path: str, extra_mounts: list[str], timeout: int) -> dict:
-        """在隔离容器里执行脚本，并把 /output 里生成的图表带回宿主机。
+    async def _run_container(
+        self,
+        script_path: str,
+        extra_mounts: list[str],
+        timeout: int,
+        collect_to: Optional[str] = None,
+    ) -> dict:
+        """在隔离容器里执行脚本，并把 /output 里的产物带回宿主机。
 
         容器内 /workspace 是 tmpfs，会随容器一起销毁；因此额外挂载一个宿主机临时目录
-        到 /output，脚本把图存到那里后由 _collect_figures 读成 data URL。
+        到 /output，脚本把产物存到那里后由 _collect_figures 读成 data URL、
+        由 _list_artifacts 生成清单，并在 collect_to 给出时全量复制到持久目录。
         """
         out_dir = tempfile.mkdtemp(prefix="yxt_figures_")
         try:
@@ -99,51 +160,97 @@ class DockerSandbox:
                 proc.kill(); await proc.wait()
                 stdout, stderr = b"", f"Timed out after {timeout}s".encode()
                 timed_out = True
+            artifacts = _list_artifacts(out_dir)
+            if collect_to:
+                try:
+                    _copy_artifacts(out_dir, collect_to)
+                except OSError as exc:
+                    logger.warning("Artifact copy to %s degraded: %s", collect_to, exc)
             return {
                 "stdout": stdout.decode("utf-8", errors="replace"),
                 "stderr": stderr.decode("utf-8", errors="replace"),
                 "exit_code": proc.returncode if not timed_out else -1,
                 "timed_out": timed_out,
                 "figures": _collect_figures(out_dir),
+                "artifacts": artifacts,
             }
         finally:
             shutil.rmtree(out_dir, ignore_errors=True)
 
-    async def execute(self, code: str, timeout: Optional[int] = None) -> dict:
+    async def execute(self, code: str, timeout: Optional[int] = None, *, collect_to: Optional[str] = None) -> dict:
         await self._ensure_image()
         timeout = timeout or self.settings.sandbox.timeout
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as f:
             f.write(code)
             temp_path = f.name
         try:
-            return await self._run_container(temp_path, [], timeout)
+            return await self._run_container(temp_path, [], timeout, collect_to)
         finally:
             try: Path(temp_path).unlink(missing_ok=True)
             except Exception: pass
 
-    async def execute_with_file(self, code: str, input_file: str, timeout: Optional[int] = None) -> dict:
+    async def execute_with_file(
+        self,
+        code: str,
+        input_file: str,
+        timeout: Optional[int] = None,
+        *,
+        mount_name: str = "data.csv",
+        collect_to: Optional[str] = None,
+    ) -> dict:
         await self._ensure_image()
         timeout = timeout or self.settings.sandbox.timeout
+        safe_name = _sanitize_mount_name(mount_name)
+        # Docker -v 只接受绝对宿主路径（相对路径会被当成命名卷并报 invalid characters）
+        host_file = str(Path(input_file).resolve())
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as f:
             f.write(code)
             temp_path = f.name
         try:
             return await self._run_container(
-                temp_path, ["-v", f"{input_file}:/workspace/data.csv:ro"], timeout
+                temp_path, ["-v", f"{host_file}:/workspace/{safe_name}:ro"], timeout, collect_to
             )
         finally:
             try: Path(temp_path).unlink(missing_ok=True)
             except Exception: pass
 
-    async def execute_with_data(self, code: str, csv_content: str, timeout: Optional[int] = None) -> dict:
+    async def execute_with_data(
+        self,
+        code: str,
+        csv_content: str,
+        timeout: Optional[int] = None,
+        *,
+        mount_name: str = "data.csv",
+        collect_to: Optional[str] = None,
+    ) -> dict:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False, encoding="utf-8") as f:
             f.write(csv_content)
             data_path = f.name
         try:
-            return await self.execute_with_file(code, data_path, timeout)
+            return await self.execute_with_file(code, data_path, timeout, mount_name=mount_name, collect_to=collect_to)
         finally:
             try: Path(data_path).unlink(missing_ok=True)
             except Exception: pass
+
+    async def env_lock(self) -> str:
+        """沙箱镜像内 pip freeze 环境锁（进程内缓存；失败回退静态快照）。"""
+        if self._env_lock_cache is not None:
+            return self._env_lock_cache
+        code = (
+            "import subprocess, sys\n"
+            "r = subprocess.run([sys.executable, '-m', 'pip', 'freeze'], capture_output=True, text=True)\n"
+            "print(r.stdout or r.stderr)\n"
+        )
+        try:
+            result = await self.execute(code, timeout=25)
+            text = (result.get("stdout") or "").strip()
+            if result.get("exit_code") == 0 and text:
+                self._env_lock_cache = text
+                return text
+        except Exception as exc:
+            logger.warning("env_lock degraded: %s", exc)
+        self._env_lock_cache = STATIC_ENV_LOCK
+        return STATIC_ENV_LOCK
 
 
 class MockSandbox:
@@ -153,7 +260,7 @@ class MockSandbox:
         self.settings = get_settings()
         self._python = sys.executable
 
-    async def execute(self, code: str, timeout: Optional[int] = None) -> dict:
+    async def execute(self, code: str, timeout: Optional[int] = None, *, collect_to: Optional[str] = None) -> dict:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as f:
             f.write(code)
             temp_path = f.name
@@ -163,18 +270,40 @@ class MockSandbox:
                 capture_output=True, text=True,
                 timeout=timeout or 30,
             )
-            return {"stdout": proc.stdout, "stderr": proc.stderr, "exit_code": proc.returncode, "timed_out": False, "figures": []}
+            return {"stdout": proc.stdout, "stderr": proc.stderr, "exit_code": proc.returncode, "timed_out": False, "figures": [], "artifacts": []}
         except subprocess.TimeoutExpired:
-            return {"stdout": "", "stderr": "Timeout", "exit_code": -1, "timed_out": True, "figures": []}
+            return {"stdout": "", "stderr": "Timeout", "exit_code": -1, "timed_out": True, "figures": [], "artifacts": []}
         finally:
             try: Path(temp_path).unlink(missing_ok=True)
             except Exception: pass
 
-    async def execute_with_file(self, code: str, input_file: str, timeout: Optional[int] = None) -> dict:
-        return await self.execute(code, timeout)
+    async def execute_with_file(
+        self,
+        code: str,
+        input_file: str,
+        timeout: Optional[int] = None,
+        *,
+        mount_name: str = "data.csv",
+        collect_to: Optional[str] = None,
+    ) -> dict:
+        # 无容器隔离：数据文件路径以环境变量暴露，脚本可通过 os.environ 读取。
+        import os
+        os.environ["YXT_MOCK_DATA_FILE"] = input_file
+        return await self.execute(code, timeout, collect_to=collect_to)
 
-    async def execute_with_data(self, code: str, csv_content: str, timeout: Optional[int] = None) -> dict:
-        return await self.execute(code, timeout)
+    async def execute_with_data(
+        self,
+        code: str,
+        csv_content: str,
+        timeout: Optional[int] = None,
+        *,
+        mount_name: str = "data.csv",
+        collect_to: Optional[str] = None,
+    ) -> dict:
+        return await self.execute(code, timeout, collect_to=collect_to)
+
+    async def env_lock(self) -> str:
+        return STATIC_ENV_LOCK
 
 
 _sandbox = None

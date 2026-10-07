@@ -3,6 +3,7 @@
 import uuid, os, logging, hashlib
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request, Response
+from fastapi.responses import FileResponse
 from pathlib import Path
 
 from src.api.schemas import (
@@ -18,7 +19,7 @@ from src.api.auth_routes import router as auth_router
 from src.api import session_store
 from src.core.config import get_settings
 from src.workflows.state import create_initial_state
-from src.workflows.supervisor_graph import get_research_app
+from src.workflows.supervisor_graph import get_research_app, analysis_answer
 from src.workflows import tracing
 from src.knowledge.kb import (
     add_chunks as kb_add_chunks,
@@ -114,10 +115,31 @@ async def upload_data_file(session_id: str, request: Request, file: UploadFile =
     content = await file.read()
     file_path.write_bytes(content)
     state["data_file_path"] = str(file_path)
+    # 画像绑定旧文件（file_path 指纹），换文件后必须清除，否则代码生成会拿到过期列名
+    state.pop("data_profile", None)
     # 独立阶段，配合 route_intent/route_after_analysis：上传后只做数据分析
     state["current_phase"] = "data_analysis"
     _persist_session(session_id, state)
     return UploadResponse(session_id=session_id, filename=file.filename, size_bytes=len(content), file_path=str(file_path), message="File uploaded. Use /analyze to run analysis.")
+
+
+@router.post("/session/{session_id}/profile")
+async def profile_data(session_id: str, request: Request):
+    """① 数据接入与画像：对最近上传的文件做格式识别 / Schema 推断 / 质量报告。
+
+    画像在沙箱内执行（后端 venv 无 pandas）；失败时返回 degraded=true，不阻塞上传/分析。
+    """
+    identity = await get_identity(request)
+    state = _get_owned_state(session_id, identity)
+    data_file = state.get("data_file_path", "")
+    if not data_file:
+        raise HTTPException(status_code=400, detail="尚未上传数据文件，请先上传后再生成画像")
+    from src.tools.profiler import profile_data_file
+
+    profile = await profile_data_file(data_file)
+    state["data_profile"] = profile
+    _persist_session(session_id, state)
+    return profile
 
 
 @router.post("/session/{session_id}/analyze", response_model=QueryResponse)
@@ -137,14 +159,59 @@ async def analyze_data(session_id: str, req: AnalyzeRequest, request: Request):
     _persist_session(session_id, result)
     exp = result.get("experiment_results", {}) or {}
     figures = exp.get("figures", []) or []
-    stdout = (exp.get("stdout") or "").strip()
-    if stdout:
-        answer = stdout
-    elif figures:
-        answer = "沙箱已执行分析并生成图表，但生成的代码没有输出文字结论。图表见下方。"
-    else:
-        answer = (exp.get("stderr") or "").strip() or "分析已执行，但没有可展示的输出。"
-    return QueryResponse(session_id=session_id, answer=answer, confidence=result.get("confidence_scores", {}).get("data_analyst", 0.5), citations=[], phase="data_analysis", figures=figures)
+    # ⑦ 解释报告优先作为答案；缺失时逐级回退（stdout → 图表提示 → stderr）
+    answer = analysis_answer(exp)
+    return QueryResponse(
+        session_id=session_id,
+        answer=answer,
+        confidence=result.get("confidence_scores", {}).get("data_analyst", 0.5),
+        citations=[],
+        phase="data_analysis",
+        figures=figures,
+        profile=exp.get("profile"),
+        task_plan=exp.get("task_plan"),
+        knowledge_recall=exp.get("knowledge_recall"),
+        validation=exp.get("validation"),
+        analysis_run=exp.get("analysis_run"),
+    )
+
+
+# ---- Data analyst packaged runs (规格⑨) ----
+
+@router.get("/session/{session_id}/analysis/runs")
+async def list_analysis_runs(session_id: str, request: Request):
+    """历次分析运行清单（manifest：文件列表/阶段耗时/降级与校验状态）。"""
+    identity = await get_identity(request)
+    _get_owned_state(session_id, identity)
+    from src.agents.data_analyst import packaging
+
+    return {"session_id": session_id, "runs": packaging.list_runs(session_id)}
+
+
+@router.get("/session/{session_id}/analysis/file/{run_id}/{name:path}")
+async def download_analysis_file(session_id: str, run_id: str, name: str, request: Request):
+    """下载产出包内单个文件（如 figures/x.png、pub/x_300dpi.svg）；防目录穿越。"""
+    identity = await get_identity(request)
+    _get_owned_state(session_id, identity)
+    from src.agents.data_analyst import packaging
+
+    path = packaging.find_file(session_id, run_id, name)
+    if path is None:
+        raise HTTPException(status_code=404, detail="产物文件不存在")
+    return FileResponse(path, filename=path.name)
+
+
+@router.get("/session/{session_id}/analysis/package/{run_id}")
+async def download_analysis_package(session_id: str, run_id: str, request: Request):
+    """产出包 zip 下载（manifest/报告/Notebook/图表/清洗数据/环境锁）。"""
+    identity = await get_identity(request)
+    _get_owned_state(session_id, identity)
+    from src.agents.data_analyst import packaging
+
+    path, filename = packaging.zip_package(session_id, run_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail="产出包不存在")
+    return FileResponse(path, filename=filename, media_type="application/zip")
 
 
 @router.post("/session/{session_id}/design", response_model=QueryResponse)
@@ -718,7 +785,25 @@ def _session_summary(session_id: str, state: dict) -> SessionListItem:
 
 
 def _build_response(session_id: str, result: dict, quota_remaining: int | None = None) -> QueryResponse:
-    return QueryResponse(session_id=session_id, answer=result.get("final_response","No response generated"), confidence=result.get("confidence_scores",{}).get("supervisor",0.5), citations=result.get("citation_chain",[]), human_review_required=result.get("human_review_required",False), phase=result.get("current_phase","literature"), quota_remaining=quota_remaining, triple_report=result.get("triple_report"))
+    # /query 意图路由也可能命中数据分析节点：experiment_results 里的分析档案一并透传
+    exp = result.get("experiment_results") or {}
+    if not isinstance(exp, dict):
+        exp = {}
+    return QueryResponse(
+        session_id=session_id,
+        answer=result.get("final_response") or "No response generated",
+        confidence=result.get("confidence_scores",{}).get("supervisor",0.5),
+        citations=result.get("citation_chain",[]),
+        human_review_required=result.get("human_review_required",False),
+        phase=result.get("current_phase","literature"),
+        quota_remaining=quota_remaining,
+        triple_report=result.get("triple_report"),
+        profile=exp.get("profile"),
+        task_plan=exp.get("task_plan"),
+        knowledge_recall=exp.get("knowledge_recall"),
+        validation=exp.get("validation"),
+        analysis_run=exp.get("analysis_run"),
+    )
 
 
 def _format_design_response(design: dict) -> str:

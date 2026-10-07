@@ -78,7 +78,7 @@ class TestDataAnalystV2:
         from src.agents.data_analyst.agent import DataAnalystAgent
         agent = DataAnalystAgent()
         assert agent.name == "data_analyst"
-        assert "v2.0" in agent.description
+        assert "v3.0" in agent.description
 
     def test_code_clean(self):
         from src.agents.data_analyst.agent import DataAnalystAgent
