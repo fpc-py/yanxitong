@@ -98,6 +98,7 @@ kg:
     - Finding
     - Author
     - Venue
+    - Experiment
   relation_types:
     - PROPOSES
     - USES_DATASET
@@ -111,6 +112,7 @@ kg:
     - APPLIED_TO
     - CITES
     - CONTRADICTS
+    - ACHIEVES
   max_entities_per_doc: 60
   max_papers: 25                  # LLM 关系补充上限（确定性边不受此限制）
   concurrency: 5
@@ -126,6 +128,23 @@ analysis:
   recall_top_k: 6                # 每个知识库（绘图/方法/期刊/教材）召回块数
   deep_verify: true              # 是否执行 LLM 校验层（假设适用性 + 叙述一致性）
   profile_timeout: 15            # 沙箱画像脚本超时（秒）
+
+# --- Experiment designer engine（证据检索/多目标优化/校验/打包预算） --------------------
+designer:
+  max_runs: 5                    # 每会话保留的设计产出包数量
+  recall_top_k: 6                # 每知识库（含实验设计库）召回块数
+  n_trials: 64                   # Optuna 多目标搜索 trial 预算
+  top_k: 3                       # Top-K 推荐方案数量
+  deep_verify: true              # 是否执行 LLM 复核层（主张-证据一致性）
+  max_gpu_hours: 24.0            # 未声明资源时的默认 GPU 时预算（资源剪枝用）
+  max_memory_gb: 16.0            # 未声明资源时的默认显存/内存预算（GB）
+  weights:                       # 六维排序权重（使用时归一化）
+    performance: 0.40
+    cost: 0.18
+    time: 0.12
+    interpretability: 0.10
+    risk: 0.12
+    complexity: 0.08
 
 # --- Sandboxed code execution (data analyst agent) ---------------------------------
 sandbox:

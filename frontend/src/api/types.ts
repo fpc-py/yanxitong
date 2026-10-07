@@ -64,6 +64,120 @@ export interface QueryResponse {
   validation?: ValidationReport | null
   /** ⑨ 本次运行的打包信息 */
   analysis_run?: AnalysisRun | null
+  /** 实验设计引擎（/design 返回，规格①-⑫） */
+  experiment_config?: DesignConfig | null
+  design_diagnosis?: DesignDiagnosis | null
+  design_evidence?: DesignEvidence | null
+  design_candidates?: {
+    candidates: DesignCandidate[]
+    pruned_candidates?: { id: string; title?: string; reason: string }[]
+    pruned?: { prior: number; resource: number }
+  } | null
+  design_optimization?: DesignOptimization | null
+  design_validation?: DesignValidation | null
+  design_run?: DesignRun | null
+  /** 论文写作产出（/write 返回） */
+  writing?: WritingPayload | null
+  /** 学术审阅产出（/write、/review 返回） */
+  review?: ReviewPayload | null
+}
+
+/** 论文写作产出 */
+export interface WritingPayload {
+  section: string
+  content: string
+}
+
+/** 审阅问题类型（与后端 checks.py 的规范 key 对应） */
+export type ReviewIssueType =
+  | 'citation_format'
+  | 'expression'
+  | 'data_integrity'
+  | 'logic'
+  | 'ai_disclosure'
+  | 'similarity'
+  | 'other'
+
+export type ReviewSeverity = 'high' | 'medium' | 'low'
+
+/** fixable=可自动修复 / open=待修 / suggest=建议 */
+export type ReviewIssueStatus = 'fixable' | 'open' | 'suggest'
+
+/** 逐段审阅问题（带原文定位） */
+export interface ReviewIssue {
+  id: string
+  type: ReviewIssueType
+  severity: ReviewSeverity
+  status: ReviewIssueStatus
+  quote: string
+  description: string
+  suggestion: string
+  /** 所属章节（草稿标题） */
+  section: string
+  /** 章节内段号（1 基），未定位时为 null */
+  para: number | null
+  fixable: boolean
+  located: boolean
+  source: 'rule' | 'reviewer'
+}
+
+/** 审阅统计 */
+export interface ReviewStats {
+  total: number
+  citation_format: number
+  citation_fixable: number
+  citation_manual: number
+  polish: number
+  misconduct: number
+  high: number
+  similarity_pct: number | null
+  similarity_safe: boolean | null
+  similarity_threshold: number
+}
+
+/** 本地查重自检结果 */
+export interface ReviewSimilarity {
+  pct: number | null
+  safe: boolean | null
+  threshold: number
+  matches: { quote: string; ratio: number; title: string; located: boolean }[]
+  papers_compared: number
+  method: string
+}
+
+/** 审阅维度评分块 */
+export interface ReviewDimension {
+  score?: number
+  issues?: string[]
+  suggestions?: string[]
+}
+
+/** 学术审阅产出 */
+export interface ReviewPayload {
+  overall_score: number
+  recommendation: string
+  summary: string
+  strengths: string[]
+  weaknesses: string[]
+  revision_checklist: string[]
+  detailed_comments?: string
+  issues: ReviewIssue[]
+  stats: ReviewStats
+  similarity: ReviewSimilarity
+  style: string
+  structure?: ReviewDimension
+  logic?: ReviewDimension
+  citations?: ReviewDimension & { missing_citations?: string[] }
+  data_consistency?: ReviewDimension
+  format?: ReviewDimension
+  language?: ReviewDimension
+  novelty?: { score?: number; assessment?: string }
+  /** 引用核验结果（绿标数据源） */
+  citation_trace?: {
+    resolved: { marker: string; paper_id: string; title: string; arxiv_id: string }[]
+    unresolved: number[]
+    markers: number
+  }
 }
 
 /** 上传文件响应 */
@@ -228,6 +342,12 @@ export interface SessionStatus {
   error: string | null
   has_data_file: boolean
   has_draft: boolean
+  /** 最近一次写作的章节 key（用于写作页恢复） */
+  writing_section: string
+  /** 会话中最近一次生成的草稿全文（用于页面恢复） */
+  writing_draft: string
+  /** 会话中最近一次的审阅结果（用于页面恢复） */
+  review: ReviewPayload | null
 }
 
 /** 会话列表项（历史会话侧栏） */
@@ -610,4 +730,297 @@ export interface KgBackfillResult {
   degraded: boolean
   error?: string
   errors?: string[]
+}
+
+// ---- 实验设计引擎（对齐 /api/session/{sid}/design* 端点，规格①-⑫） ----
+
+/** 规范配置（① 解析产物：请求体 experiment_config 优先，query 由 LLM 补齐） */
+export interface DesignConfig {
+  task?: string
+  model?: { name?: string; family?: string; params_m?: number }
+  hyperparams?: Record<string, number | string>
+  data?: { name?: string; n_samples?: number; n_classes?: number; augmentation?: string[] }
+  resources?: { gpu?: string; gpu_hours?: number; memory_gb?: number }
+  metrics?: string[]
+  missing?: string[]
+}
+
+/** 瓶颈条目（① 五类：model_outdated/hyperparam_drift/data_insufficient/strategy_missing/resource_mismatch） */
+export interface DesignBottleneck {
+  type: string
+  severity: string
+  finding: string
+  recommendation?: string
+  evidence_refs?: string[]
+}
+
+export interface DesignDiagnosis {
+  bottlenecks: DesignBottleneck[]
+  summary?: string
+  /** 无证据锚点支撑被剔除的瓶颈数（规格⑪） */
+  dropped?: number
+}
+
+/** 证据锚点（② id 前缀：kg:ent:/kg:chain:/kg:path:/kb:/paper:） */
+export interface DesignEvidenceAnchor {
+  id: string
+  kind: string
+  ref?: string
+  text?: string
+  library?: string
+  label?: string
+  section?: string
+  similarity?: number
+  title?: string
+  year?: number | string
+}
+
+/** 证据集（② KG 路径 + 知识库 + 文献，任一来源失败只降级） */
+export interface DesignEvidence {
+  keywords?: string[]
+  kg?: {
+    entities: Record<string, unknown>[]
+    chains: Record<string, unknown>[]
+    paths: Record<string, unknown>[]
+    degraded: boolean
+    error?: string
+  }
+  kb?: KnowledgeRecall | null
+  literature?: DesignEvidenceAnchor[]
+  anchors?: DesignEvidenceAnchor[]
+  degraded?: boolean
+  sources?: number
+}
+
+/** 候选方案（④ 多路由 + 证据门控；source=llm|heuristic） */
+export interface DesignCandidate {
+  id: string
+  route: string
+  title: string
+  description?: string
+  config_patch?: Record<string, unknown>
+  hyperparams?: Record<string, number | string>
+  evidence_refs?: string[]
+  expected?: string
+  risk?: string
+  complexity?: string
+  interpretability?: string
+  source?: string
+  severity?: string
+}
+
+/** 代理模型三目标估计（性能↑/成本↓/时间↓，带不确定度） */
+export interface DesignObjectives {
+  performance: number
+  cost: number
+  time: number
+}
+
+/** 排序条目（⑥ 六维加权 Top-K） */
+export interface DesignRankEntry {
+  rank: number
+  candidate_id: string
+  title: string
+  route: string
+  severity?: string
+  source?: string
+  evidence_refs?: string[]
+  config_patch?: Record<string, unknown>
+  params: Record<string, number | string>
+  objectives: DesignObjectives
+  uncertainty: DesignObjectives
+  score: number
+  risk?: string
+  complexity?: string
+  interpretability?: string
+  expected?: string
+}
+
+/** Pareto 前沿点（⑤） */
+export interface DesignParetoPoint {
+  trial: number
+  candidate_id: string
+  title?: string
+  route?: string
+  params: Record<string, number | string>
+  objectives: DesignObjectives
+  uncertainty: DesignObjectives
+}
+
+/** 搜索空间维度（source=prior 来自课题组先验 / kb 来自经验带） */
+export interface DesignSpaceDim {
+  low: number
+  high: number
+  kind: string
+  log: boolean
+  source: string
+}
+
+/** 多目标优化结果（⑤⑥；method=optuna|builtin，ok=false 时看 error） */
+export interface DesignOptimization {
+  method: string
+  fallback: boolean
+  objectives: string[]
+  n_trials: number
+  n_evaluated: number
+  pruned: { prior: number; resource: number }
+  pruned_candidates: { id: string; title?: string; reason: string }[]
+  space: Record<string, DesignSpaceDim>
+  pareto: DesignParetoPoint[]
+  ranking: DesignRankEntry[]
+  top_k: DesignRankEntry[]
+  note?: string
+  ok: boolean
+  error?: string
+}
+
+/** 确定性检查（⑪第一层：引用覆盖率/数值域/不确定度标注/资源自洽/多样性） */
+export interface DesignCheck {
+  id: string
+  ok: boolean
+  severity: string
+  finding: string
+}
+
+/** 可行性条目（⑦ 五类：resource/dependency/data/ethics/reproducibility） */
+export interface DesignFeasibilityItem {
+  dimension: string
+  ok: boolean
+  severity: string
+  finding: string
+  alternative?: string
+}
+
+/** 验证计划（⑧ 消融/对照/显著性/功效/回滚/可复现） */
+export interface DesignValidationPlan {
+  ablation: { component: string; remove_to_test: string; expect: string }[]
+  controls: string[]
+  significance: { primary_test?: string; correction?: string; alpha?: number; report?: string }
+  power: {
+    min_meaningful_difference_sigma?: number
+    required_n_per_group?: number
+    planned_seeds?: number
+    adequate?: boolean
+    note?: string
+  }
+  rollback: { criterion: string; action: string }[]
+  reproducibility: string[]
+  evidence_refs?: string[]
+}
+
+/** 校验报告（⑦⑪：可行性 + 确定性 + LLM 复核 + 验证计划） */
+export interface DesignValidation {
+  overall: string
+  deterministic: { checks: DesignCheck[]; overall: string }
+  llm: {
+    consistency?: string
+    issues?: { claim?: string; problem?: string; severity?: string; evidence_ref?: string }[]
+    narrative?: string
+    degraded?: boolean
+  } | null
+  feasibility: { items: DesignFeasibilityItem[]; overall: string; dimensions: string[] }
+  plan?: DesignValidationPlan | null
+}
+
+/** 静态校验（⑨ 语法 + 依赖对照沙箱镜像清单；不实际执行训练） */
+export interface DesignStaticCheck {
+  ok: boolean
+  mode: string
+  syntax_ok: boolean
+  syntax_error?: string
+  imports?: string[]
+  missing?: string[]
+  env_packages?: number
+  note?: string
+}
+
+/** 推荐配置（含 _meta 估计声明） */
+export interface DesignRecommendedConfig extends DesignConfig {
+  _meta?: {
+    candidate_id?: string
+    title?: string
+    route?: string
+    evidence_refs?: string[]
+    score?: number
+    objectives?: DesignObjectives
+    uncertainty?: DesignObjectives
+    estimates_note?: string
+    execution_note?: string
+  }
+}
+
+/** 设计运行打包信息（⑫） */
+export interface DesignRun {
+  run_id: string
+  degraded: boolean
+  stages: AnalysisStage[]
+  files: AnalysisArtifact[]
+  optimization_method?: string
+  validation_overall?: string
+  recommended?: DesignRecommendedConfig | null
+  static_check?: DesignStaticCheck | null
+  report?: string
+}
+
+/** 历次设计运行 manifest（GET /design/runs） */
+export interface DesignRunManifest {
+  run_id: string
+  session_id: string
+  created_at: string
+  intent: string
+  candidates?: number
+  stages?: { stage?: string; ok?: boolean; ms?: number; degraded?: boolean }[]
+  recommended?: { candidate_id?: string; title?: string; route?: string }
+  files?: AnalysisArtifact[]
+  optimization?: { method?: string; n_trials?: number; n_evaluated?: number; pruned?: Record<string, number> }
+  validation_overall?: string
+  [key: string]: unknown
+}
+
+/** 反馈回写结果（⑩ 闭环：先验存储必写 + KG 尽力） */
+export interface DesignFeedbackResult {
+  ok: boolean
+  record_id?: number | null
+  candidate_id?: string
+  task?: string
+  method?: string
+  dataset?: string
+  metric?: string
+  value?: number | null
+  error?: string
+  kg: { ok: boolean; degraded: boolean; written: number; error?: string }
+}
+
+/** 先验统计（⑩ 闭环读侧：方法-数据集-指标矩阵 + 超参区间） */
+export interface DesignPriorsResponse {
+  session_id: string
+  matrix: {
+    method?: string
+    dataset?: string
+    metric?: string
+    n: number
+    mean?: number
+    min?: number
+    max?: number
+    std?: number | null
+  }[]
+  priors: {
+    rows: number
+    metrics?: DesignPriorsResponse['matrix']
+    hyperparams: Record<string, { n: number; min: number; max: number; mean: number; p10?: number; p90?: number }>
+    cost?: { n: number; min: number; max: number; mean: number } | null
+    duration?: { n: number; min: number; max: number; mean: number } | null
+  }
+  recent: {
+    run_id?: string
+    method?: string
+    dataset?: string
+    metric?: string
+    value?: number | null
+    cost?: number | null
+    duration_hours?: number | null
+    created_at?: string
+    [key: string]: unknown
+  }[]
+  total: number
 }

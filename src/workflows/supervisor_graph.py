@@ -129,12 +129,37 @@ async def experiment_designer_node(state: ResearchState) -> ResearchState:
     agent = ExperimentDesignerAgent()
     result = await agent.execute(state)
     if result.success:
+        engine = result.data.get("design_engine") or {}
         state["experiment_results"] = {
             **(state.get("experiment_results") or {}),
             "design": result.data.get("experiment_design", {}),
+            "design_engine": engine,
+            "design_run": result.data.get("design_run", {}),
         }
         state["confidence_scores"]["experiment_designer"] = result.confidence
+        # /query 路径经 _build_response 依赖 final_response：解释报告优先，回退经典渲染
+        state["final_response"] = (engine.get("report") or "").strip() or _fallback_design_text(
+            result.data.get("experiment_design", {})
+        )
+    else:
+        state["error_message"] = result.error
+        state["final_response"] = f"Error: {result.error}"
     return state
+
+
+def _fallback_design_text(design: dict) -> str:
+    """无报告时的设计答复回退（含假设/变量/统计方法字样，满足演示契约）。"""
+    design = design or {}
+    variables = design.get("variables") or {}
+    return "\n\n".join([
+        "## 实验设计方案",
+        f"**假设**: {design.get('hypothesis') or 'N/A'}",
+        f"**自变量**: {', '.join(variables.get('independent') or []) or 'N/A'}",
+        f"**因变量**: {', '.join(variables.get('dependent') or []) or 'N/A'}",
+        f"**控制变量**: {', '.join(variables.get('controlled') or []) or 'N/A'}",
+        f"**统计方法**: {', '.join(design.get('statistical_methods') or []) or 'N/A'}",
+        f"**推荐验证方案**: {design.get('recommended_validation') or 'N/A'}",
+    ])
 
 
 async def writing_node(state: ResearchState) -> ResearchState:
@@ -216,6 +241,9 @@ def route_intent(state: ResearchState) -> Literal["retrieve", "data_analyst", "e
         return "data_analyst"
     if phase == "design":
         return "experiment_designer"
+    # /review 直达审稿节点：绝不重跑写作，避免新生成草稿覆盖用户提交的待审稿
+    if phase == "review":
+        return "academic_reviewer"
     if phase == "writing":
         return "writing"
 

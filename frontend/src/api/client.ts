@@ -12,6 +12,10 @@ import type {
   CitationChainResponse,
   CreateSessionBody,
   DataProfile,
+  DesignConfig,
+  DesignFeedbackResult,
+  DesignPriorsResponse,
+  DesignRunManifest,
   HealthResponse,
   KgAuditEntry,
   KgBackfillResult,
@@ -241,9 +245,60 @@ const api = {
     return `/api/session/${sessionId}/analysis/file/${encodeURIComponent(runId)}/${encoded}`
   },
 
-  /** 6. 实验设计 */
-  async design(sessionId: string, query: string): Promise<QueryResponse> {
-    const { data } = await http.post<QueryResponse>(`/session/${sessionId}/design`, { query })
+  /** 6. 实验设计（可带当前实验配置：模型/超参/数据/资源 → 瓶颈诊断与优化） */
+  async design(sessionId: string, query: string, experimentConfig?: DesignConfig | null): Promise<QueryResponse> {
+    const { data } = await http.post<QueryResponse>(`/session/${sessionId}/design`, {
+      session_id: sessionId,
+      query,
+      experiment_config: experimentConfig ?? null,
+    })
+    return data
+  },
+
+  /** 6a. 历次设计运行清单（manifest：候选数/阶段耗时/推荐方案/产出文件） */
+  async getDesignRuns(sessionId: string): Promise<DesignRunManifest[]> {
+    const { data } = await http.get<{ session_id: string; runs: DesignRunManifest[] }>(
+      `/session/${sessionId}/design/runs`,
+    )
+    return data.runs ?? []
+  },
+
+  /** 6b. 设计产出包内单个文件下载地址（code/train.py、candidates/c1.json 等） */
+  designFileUrl(sessionId: string, runId: string, name: string): string {
+    const encoded = name.split('/').map(encodeURIComponent).join('/')
+    return `/api/session/${sessionId}/design/file/${encodeURIComponent(runId)}/${encoded}`
+  },
+
+  /** 6c. 下载设计产出包 zip（报告/推荐配置/候选/证据/校验/训练脚本） */
+  async downloadDesignPackage(sessionId: string, runId: string): Promise<Blob> {
+    const { data } = await http.get<Blob>(
+      `/session/${sessionId}/design/package/${encodeURIComponent(runId)}`,
+      { responseType: 'blob', timeout: 120_000 },
+    )
+    return data
+  },
+
+  /** 6d. 闭环反馈⑩：实测结果回流先验存储 + 知识图谱 */
+  async submitDesignFeedback(
+    sessionId: string,
+    payload: {
+      run_id: string
+      candidate_id?: string
+      metrics?: Record<string, number>
+      cost?: number | null
+      duration_hours?: number | null
+      notes?: string
+    },
+  ): Promise<DesignFeedbackResult> {
+    const { data } = await http.post<DesignFeedbackResult>(`/session/${sessionId}/design/feedback`, payload)
+    return data
+  },
+
+  /** 6e. 先验统计（闭环读侧）：方法-数据集-指标矩阵 + 超参区间 + 最近回写 */
+  async getDesignPriors(sessionId: string, task = '', method = ''): Promise<DesignPriorsResponse> {
+    const { data } = await http.get<DesignPriorsResponse>(`/session/${sessionId}/design/priors`, {
+      params: { task: task || undefined, method: method || undefined },
+    })
     return data
   },
 
@@ -253,11 +308,12 @@ const api = {
     return data
   },
 
-  /** 8. 学术审阅（draft 以 [APA]/[MLA]/[GBT] 前缀指定引用格式） */
-  async review(sessionId: string, draft: string): Promise<QueryResponse> {
+  /** 8. 学术审阅（style: APA/MLA/GBT；draft 也可用 [APA] 前缀指定） */
+  async review(sessionId: string, draft: string, style?: string): Promise<QueryResponse> {
     const { data } = await http.post<QueryResponse>(`/session/${sessionId}/review`, {
       session_id: sessionId,
       draft,
+      style,
     })
     return data
   },

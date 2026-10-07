@@ -1,6 +1,6 @@
 """规格③ 内置知识库：种子切块 / 幂等装载 / 向量召回 / 关键词回退。
 
-4 个库（绘图模板/统计方法/期刊规范/学科教材）写入独立命名空间
+5 个库（绘图模板/统计方法/期刊规范/学科教材/实验设计）写入独立命名空间
 ``kb:lib:{name}``，与用户 team/personal 双区互不可见（不污染 list_files）。
 """
 
@@ -39,6 +39,11 @@ _SEEDS = {
         "# 学科教材库\n\n## 标准差与标准误\n\n"
         "SD 描述离散程度，SE = SD/√n 描述均值稳定性。\n\n"
         "## IQR 与异常值判定\n\nQ1-1.5IQR 与 Q3+1.5IQR 之外视为可疑异常值。\n"
+    ),
+    "design_priors.md": (
+        "# 实验设计库\n\n## 超参先验区间（学习率）\n\n"
+        "CNN 用 SGD 0.05–0.1，Transformer 用 AdamW 1e-5–1e-3。\n\n"
+        "## 消融实验模板\n\n完整模型/移除组件/基线三件套，≥3 个随机种子。\n"
     ),
 }
 
@@ -83,9 +88,18 @@ def test_split_sections_ignores_headings_in_code_fence():
 
 
 def test_lib_scopes_configuration():
-    assert kl.LIB_SCOPES == ["kb:lib:plotting", "kb:lib:methods", "kb:lib:journal", "kb:lib:textbook"]
+    assert kl.LIB_SCOPES == [
+        "kb:lib:plotting", "kb:lib:methods", "kb:lib:journal",
+        "kb:lib:textbook", "kb:lib:design",
+    ]
     assert kl.lib_scope("methods") == "kb:lib:methods"
     assert set(kl.LIB_FILES) == set(kl.LIB_LABELS)
+    assert kl.DEFAULT_LIBRARIES == ["plotting", "methods", "journal", "textbook"]
+    assert kl.DESIGN_LIBRARIES == ["design", "methods", "textbook"]
+    # kb.scope_of 必须把 5 个库名都映射到独立命名空间
+    # （回归：design 曾未登记进 kb.KB_LIBRARIES，落进 kb:system 导致召回为空）
+    for library in kl.LIB_LABELS:
+        assert kb_mod.scope_of(library, "system") == kl.lib_scope(library)
 
 
 def test_real_seed_files_exist_and_parse():
@@ -102,7 +116,7 @@ def test_real_seed_files_exist_and_parse():
 
 def test_ensure_seeded_and_idempotent(lib_env):
     added = lib_env.ensure_seeded()
-    assert added == 12  # 4 库 × 3 小节（总览 + 2 个 ## 小节）
+    assert added == 15  # 5 库 × 3 小节（总览 + 2 个 ## 小节）
 
     # 二次调用（重置进程标志后）依旧零新增：块级 sha256 去重
     lib_env._seeded = False
@@ -132,7 +146,7 @@ def test_recall_vector_channel(lib_env):
     result = lib_env.recall("比较两组差异并画出带误差线的柱状图")
     assert result["degraded"] is False
     assert result["sources"] > 0
-    assert set(result["libraries"]) == set(kl.LIB_LABELS)
+    assert set(result["libraries"]) == set(kl.DEFAULT_LIBRARIES)
     total = sum(len(v["chunks"]) for v in result["libraries"].values())
     assert total == result["sources"]
     for lib, info in result["libraries"].items():
@@ -140,6 +154,17 @@ def test_recall_vector_channel(lib_env):
             assert chunk["source"].startswith(info["label"])
             assert len(chunk["text"]) <= 900
             assert isinstance(chunk["similarity"], float)
+
+
+def test_recall_design_libraries_subset(lib_env):
+    """设计器召回集：只含 design/methods/textbook 三库，且不越界含绘图/期刊库。"""
+    result = lib_env.recall("Transformer 学习率区间与消融设计", libraries=kl.DESIGN_LIBRARIES)
+    assert set(result["libraries"]) == set(kl.DESIGN_LIBRARIES)
+    assert "plotting" not in result["libraries"] and "journal" not in result["libraries"]
+    assert result["libraries"]["design"]["label"] == "实验设计库"
+    # 默认调用（DA 契约）仍为原 4 库
+    default = lib_env.recall("比较两组差异")
+    assert set(default["libraries"]) == set(kl.DEFAULT_LIBRARIES)
 
 
 def test_recall_keyword_fallback(lib_env, monkeypatch):
@@ -156,7 +181,7 @@ def test_recall_keyword_fallback(lib_env, monkeypatch):
 
 
 def test_keyword_fallback_zero_overlap_takes_first_sections(lib_env):
-    libraries = lib_env._keyword_libraries("zzz qqq 无关词", top_k=3)
+    libraries = lib_env._keyword_libraries("zzz qqq 无关词", 3, list(kl.LIB_LABELS))
     for lib in kl.LIB_LABELS:
         chunks = libraries[lib]["chunks"]
         assert len(chunks) == 2  # 零命中 → 前 2 节（总览 + 第一个 ## 小节）

@@ -15,9 +15,32 @@ class AnalyzeRequest(BaseModel):
     query: str
 
 
+class DesignRequest(BaseModel):
+    """实验设计请求：可带当前实验配置（模型/超参/数据/资源），用于瓶颈诊断与优化。"""
+
+    session_id: Optional[str] = Field(None, description="会话 id（路径已含，缺省可不填）")
+    query: str
+    experiment_config: Optional[dict] = Field(
+        None,
+        description="当前实验配置，形如 {model, hyperparams:{lr,batch_size,...}, dataset:{name,size}, resources:{gpu_hours,memory_gb}}",
+    )
+
+
+class DesignFeedbackRequest(BaseModel):
+    """实验结果回流（闭环反馈⑩）：写入先验存储与知识图谱。"""
+
+    run_id: str
+    candidate_id: str = Field("", description="候选方案 id（可选，缺省取推荐方案）")
+    metrics: dict = Field(default_factory=dict, description="实测指标 {指标名: 数值}")
+    cost: Optional[float] = Field(None, description="实测成本（相对单位，可选）")
+    duration_hours: Optional[float] = Field(None, description="实测训练时长（小时，可选）")
+    notes: str = Field("", description="备注/配置偏差说明")
+
+
 class ReviewRequest(BaseModel):
     session_id: str
     draft: Optional[str] = Field(None, description="Paper draft. Prefix with [APA]/[MLA]/[GBT] for style.")
+    style: Optional[str] = Field(None, description="引用格式：APA / MLA / GBT（缺省 GB/T 7714）")
 
 
 class UploadResponse(BaseModel):
@@ -74,6 +97,49 @@ class QueryResponse(BaseModel):
         None,
         description="数据分析⑨：产出包元数据（run_id/降级状态/阶段轨迹/产物清单）",
     )
+    # ---- Experiment designer（实验方案优化引擎） ----
+    experiment_config: Optional[dict] = Field(
+        None,
+        description="实验设计①：解析后的当前实验配置（模型/超参/数据/资源）",
+    )
+    design_diagnosis: Optional[dict] = Field(
+        None,
+        description="实验设计①：瓶颈诊断（模型落后/超参偏离/数据不足/策略缺失/资源不匹配）",
+    )
+    design_evidence: Optional[dict] = Field(
+        None,
+        description="实验设计②：证据集（KG 路径/文献引用/知识库块，逐条来源锚点）",
+    )
+    design_candidates: Optional[dict] = Field(
+        None,
+        description="实验设计④：多路候选方案（结构/超参/数据/策略，含估计值与证据引用）",
+    )
+    design_optimization: Optional[dict] = Field(
+        None,
+        description="实验设计⑤⑥：多目标优化（Pareto 前沿 + Top-K 加权推荐）",
+    )
+    design_validation: Optional[dict] = Field(
+        None,
+        description="实验设计⑦⑧⑪：可行性校验 + 验证计划 + 幻觉校验报告",
+    )
+    design_run: Optional[dict] = Field(
+        None,
+        description="实验设计⑨⑫：产出包元数据（run_id/阶段轨迹/产物清单/降级状态）",
+    )
+    # ---- Writing assistant / Academic reviewer（成果产出页） ----
+    writing: Optional[dict] = Field(
+        None,
+        description="论文写作：{section, content}；/write 返回，写作页据此渲染带标注的草稿",
+    )
+    review: Optional[dict] = Field(
+        None,
+        description=(
+            "学术审阅：{overall_score, recommendation, summary, strengths, weaknesses, "
+            "revision_checklist, issues:[{id,type,severity,status,quote,description,suggestion,"
+            "section,para,fixable,located}], stats, similarity, citation_trace 等}；"
+            "/write、/review 返回"
+        ),
+    )
 
 
 # ---- Auth -------------------------------------------------------------------
@@ -128,6 +194,9 @@ class SessionStatus(BaseModel):
     error: Optional[str] = None
     has_data_file: bool = False
     has_draft: bool = False
+    writing_section: str = Field("", description="最近一次写作的章节 key")
+    writing_draft: str = Field("", description="会话中最近一次生成的草稿全文（用于页面恢复）")
+    review: Optional[dict] = Field(None, description="会话中最近一次的审阅结果（用于页面恢复）")
 
 
 class SessionListItem(BaseModel):

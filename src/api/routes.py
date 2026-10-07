@@ -8,6 +8,7 @@ from pathlib import Path
 
 from src.api.schemas import (
     QueryRequest, AnalyzeRequest, ReviewRequest,
+    DesignRequest, DesignFeedbackRequest,
     QueryResponse, SessionStatus, CitationChainResponse, HealthResponse,
     UploadResponse, SessionListItem,
     SystemCapabilities, DefenseItem, MetricsSummary,
@@ -215,10 +216,12 @@ async def download_analysis_package(session_id: str, run_id: str, request: Reque
 
 
 @router.post("/session/{session_id}/design", response_model=QueryResponse)
-async def design_experiment(session_id: str, req: QueryRequest, request: Request):
+async def design_experiment(session_id: str, req: DesignRequest, request: Request):
     identity = await get_identity(request)
     state = _get_owned_state(session_id, identity)
     state["user_query"] = req.query or state.get("user_query", "Design experiment")
+    if req.experiment_config is not None:
+        state["experiment_config"] = req.experiment_config
     # 用独立的 "design" 阶段，避免被 route_intent 误判为数据分析（experiment）而先跑沙箱
     state["current_phase"] = "design"
     state["final_response"] = None
@@ -231,9 +234,91 @@ async def design_experiment(session_id: str, req: QueryRequest, request: Request
         raise HTTPException(status_code=500, detail=str(e))
     _persist_session(session_id, result)
     exp = result.get("experiment_results", {})
-    design = exp.get("design", {}) if isinstance(exp, dict) else {}
-    answer = _format_design_response(design)
-    return QueryResponse(session_id=session_id, answer=answer, confidence=result.get("confidence_scores", {}).get("experiment_designer", 0.5), citations=[], phase="experiment")
+    if not isinstance(exp, dict):
+        exp = {}
+    design = exp.get("design", {}) or {}
+    engine = exp.get("design_engine") or {}
+    # ①⑨ 解释报告优先作为答案；缺失时回退经典渲染（含假设/变量/统计方法）
+    answer = str(engine.get("report") or "").strip() or _format_design_response(design)
+    return QueryResponse(
+        session_id=session_id,
+        answer=answer,
+        confidence=result.get("confidence_scores", {}).get("experiment_designer", 0.5),
+        citations=[],
+        phase="experiment",
+        **_design_fields(exp),
+    )
+
+
+# ---- Experiment designer packaged runs & closed loop（规格⑨⑩⑫） ----
+
+@router.get("/session/{session_id}/design/runs")
+async def list_design_runs(session_id: str, request: Request):
+    """历次设计运行清单（manifest：候选数/阶段耗时/推荐方案/产出文件）。"""
+    identity = await get_identity(request)
+    _get_owned_state(session_id, identity)
+    from src.agents.experiment_designer import packaging
+
+    return {"session_id": session_id, "runs": packaging.list_runs(session_id)}
+
+
+@router.get("/session/{session_id}/design/file/{run_id}/{name:path}")
+async def download_design_file(session_id: str, run_id: str, name: str, request: Request):
+    """下载产出包内单个文件（如 code/train.py、candidates/c1.json）；防目录穿越。"""
+    identity = await get_identity(request)
+    _get_owned_state(session_id, identity)
+    from src.agents.experiment_designer import packaging
+
+    path = packaging.find_file(session_id, run_id, name)
+    if path is None:
+        raise HTTPException(status_code=404, detail="产物文件不存在")
+    return FileResponse(path, filename=path.name)
+
+
+@router.get("/session/{session_id}/design/package/{run_id}")
+async def download_design_package(session_id: str, run_id: str, request: Request):
+    """产出包 zip 下载（stages/候选/推荐配置/证据/校验/训练脚本/报告）。"""
+    identity = await get_identity(request)
+    _get_owned_state(session_id, identity)
+    from src.agents.experiment_designer import packaging
+
+    path, filename = packaging.zip_package(session_id, run_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail="产出包不存在")
+    return FileResponse(path, filename=filename, media_type="application/zip")
+
+
+@router.post("/session/{session_id}/design/feedback")
+async def design_feedback(session_id: str, req: DesignFeedbackRequest, request: Request):
+    """规格⑩闭环：实测结果回流 → 先验存储（必写）+ KG Experiment/ACHIEVES（尽力）。"""
+    identity = await get_identity(request)
+    _get_owned_state(session_id, identity)
+    from src.agents.experiment_designer.agent import record_feedback
+
+    result = await record_feedback(
+        session_id, req.run_id,
+        candidate_id=req.candidate_id, metrics=req.metrics,
+        cost=req.cost, duration_hours=req.duration_hours, notes=req.notes,
+    )
+    if not result.get("ok") and result.get("error"):
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@router.get("/session/{session_id}/design/priors")
+async def design_priors(session_id: str, request: Request, task: str = "", method: str = ""):
+    """方法-数据集-指标矩阵 + 先验统计（闭环反馈的读侧，供前端展示与再设计）。"""
+    identity = await get_identity(request)
+    _get_owned_state(session_id, identity)
+    from src.knowledge import prior_store
+
+    return {
+        "session_id": session_id,
+        "matrix": prior_store.query_matrix(task=task, method=method),
+        "priors": prior_store.query_priors(task=task, method=method),
+        "recent": prior_store.recent_experiments(limit=10, session_id=session_id),
+        "total": prior_store.count_experiments(),
+    }
 
 
 # ---- Phase 3 endpoints ----
@@ -273,26 +358,40 @@ async def write_paper(session_id: str, req: QueryRequest, request: Request):
     _persist_session(session_id, result)
 
     content = result.get("writing_draft", result.get("final_response", ""))
-    return QueryResponse(session_id=session_id, answer=content[:5000], confidence=result.get("confidence_scores", {}).get("writing_assistant", 0.5), citations=[], phase="writing")
+    # 写作节点后图自动串审：把审阅结果一并返回，写作页直接展示逐段建议与标注
+    exp = result.get("experiment_results", {})
+    review = exp.get("review") if isinstance(exp, dict) else None
+    return QueryResponse(
+        session_id=session_id,
+        answer=content[:5000],
+        confidence=result.get("confidence_scores", {}).get("writing_assistant", 0.5),
+        citations=[],
+        phase="writing",
+        writing={"section": section, "content": content[:12000]},
+        review=review if isinstance(review, dict) and review else None,
+    )
 
 
 @router.post("/session/{session_id}/review", response_model=QueryResponse)
 async def review_draft(session_id: str, req: ReviewRequest, request: Request):
-    """Enhanced review with style specification. Include style in draft prefix: [APA]/[MLA]/[GBT]."""
+    """Enhanced review with style specification. Style via body field or [APA]/[MLA]/[GBT] prefix."""
     identity = await get_identity(request)
     state = _get_owned_state(session_id, identity)
 
-    draft = req.draft or state.get("writing_draft", "")
-    style = "GB/T 7714"
+    draft = (req.draft or "").strip()
+    if not draft:
+        draft = state.get("writing_draft", "")
+    style = _normalize_citation_style(req.style)
     for s in ["APA", "MLA", "GBT", "GB/T"]:
         if draft.startswith(f"[{s}]"):
-            style = "GB/T 7714" if s in ("GBT", "GB/T") else s
+            style = _normalize_citation_style(s)
             draft = draft[len(f"[{s}]"):].strip()
             break
 
     state["writing_draft"] = draft
     state["citation_style"] = style
-    state["current_phase"] = "writing"
+    # phase=review 让入口路由直达审稿节点：不重跑写作，用户提交的草稿就是被审的对象
+    state["current_phase"] = "review"
 
     app = get_research_app()
     config = {"configurable": {"thread_id": session_id}}
@@ -306,7 +405,22 @@ async def review_draft(session_id: str, req: ReviewRequest, request: Request):
     exp = result.get("experiment_results", {})
     review = exp.get("review", {}) if isinstance(exp, dict) else {}
     answer = _format_review_response(review, style)
-    return QueryResponse(session_id=session_id, answer=answer, confidence=result.get("confidence_scores", {}).get("academic_reviewer", 0.5), citations=[], phase="writing")
+    return QueryResponse(
+        session_id=session_id,
+        answer=answer,
+        confidence=result.get("confidence_scores", {}).get("academic_reviewer", 0.5),
+        citations=[],
+        phase="review",
+        review=review or None,
+    )
+
+
+def _normalize_citation_style(value: str | None) -> str:
+    """Map API/BMI style tokens to a canonical citation style name."""
+    v = (value or "").strip().upper()
+    if v in ("APA", "MLA"):
+        return v
+    return "GB/T 7714"
 
 
 @router.post("/session/{session_id}/bibliography")
@@ -352,7 +466,24 @@ async def get_session_status(session_id: str, request: Request):
         kg_entities_count = await gs.session_entity_count(session_id)
     except Exception as e:
         logger.warning("Session KG count degraded: %s", e)
-    return SessionStatus(session_id=session_id, topic=state.get("research_topic",""), current_phase=state.get("current_phase","literature"), papers_count=len(state.get("literature_results",[])), kg_entities_count=kg_entities_count, confidence_scores=state.get("confidence_scores",{}), human_review_required=state.get("human_review_required",False), error=state.get("error_message"), has_data_file=bool(state.get("data_file_path","")))
+    exp = state.get("experiment_results", {})
+    review = exp.get("review") if isinstance(exp, dict) else None
+    draft = state.get("writing_draft", "")
+    return SessionStatus(
+        session_id=session_id,
+        topic=state.get("research_topic", ""),
+        current_phase=state.get("current_phase", "literature"),
+        papers_count=len(state.get("literature_results", [])),
+        kg_entities_count=kg_entities_count,
+        confidence_scores=state.get("confidence_scores", {}),
+        human_review_required=state.get("human_review_required", False),
+        error=state.get("error_message"),
+        has_data_file=bool(state.get("data_file_path", "")),
+        has_draft=bool(draft),
+        writing_section=state.get("writing_section", ""),
+        writing_draft=draft or "",
+        review=review if isinstance(review, dict) and review else None,
+    )
 
 
 @router.get("/session/{session_id}/citation-chain", response_model=CitationChainResponse)
@@ -784,6 +915,35 @@ def _session_summary(session_id: str, state: dict) -> SessionListItem:
     )
 
 
+def _design_fields(exp: dict) -> dict:
+    """从 experiment_results 透传实验设计引擎七个响应字段（无设计结果时为空 dict）。"""
+    engine = exp.get("design_engine") or {}
+    run = exp.get("design_run") or {}
+    if not engine and not run:
+        return {}
+    optimization = engine.get("optimization") or {}
+    validation = dict(engine.get("validation") or {})
+    validation["plan"] = engine.get("plan")
+    return {
+        "experiment_config": engine.get("config"),
+        "design_diagnosis": engine.get("diagnosis"),
+        "design_evidence": engine.get("evidence") or None,
+        "design_candidates": {
+            "candidates": engine.get("candidates") or [],
+            "pruned_candidates": optimization.get("pruned_candidates") or [],
+            "pruned": optimization.get("pruned") or {},
+        } if engine else None,
+        "design_optimization": optimization or None,
+        "design_validation": validation or None,
+        "design_run": {
+            **run,
+            "recommended": engine.get("recommended"),
+            "static_check": engine.get("static_check"),
+            "report": engine.get("report"),
+        } if run else None,
+    }
+
+
 def _build_response(session_id: str, result: dict, quota_remaining: int | None = None) -> QueryResponse:
     # /query 意图路由也可能命中数据分析节点：experiment_results 里的分析档案一并透传
     exp = result.get("experiment_results") or {}
@@ -803,6 +963,7 @@ def _build_response(session_id: str, result: dict, quota_remaining: int | None =
         knowledge_recall=exp.get("knowledge_recall"),
         validation=exp.get("validation"),
         analysis_run=exp.get("analysis_run"),
+        **_design_fields(exp),
     )
 
 

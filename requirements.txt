@@ -56,6 +56,9 @@ opentelemetry-exporter-otlp-proto-grpc==1.36.0
 opentelemetry-instrumentation-fastapi==0.57b0
 prometheus-client==0.22.1
 
+# --- Experiment designer (multi-objective hyper-parameter search) ---------------
+optuna==5.0.0
+
 # --- Testing & linting ----------------------------------------------------------
 pytest==8.4.1
 pytest-asyncio==1.1.0

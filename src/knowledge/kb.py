@@ -22,10 +22,10 @@ KB_DIR = os.path.join("data", "knowledge_base")
 KB_PREVIEW = 80
 TEAM_SCOPE = "kb:team"
 
-#: 内置分析知识库（绘图模板/统计方法/期刊规范/学科教材）：全局共享，独立
-#: 命名空间 kb:lib:{name}——不进入用户 KB 文件列表（list_files 只认
+#: 内置分析知识库（绘图模板/统计方法/期刊规范/学科教材/实验设计）：全局共享，
+#: 独立命名空间 kb:lib:{name}——不进入用户 KB 文件列表（list_files 只认
 #: team/personal），也不参与 GraphRAG 的文献问答合并检索。
-KB_LIBRARIES = ("plotting", "methods", "journal", "textbook")
+KB_LIBRARIES = ("plotting", "methods", "journal", "textbook", "design")
 
 _kb_store: VectorStore | None = None
 

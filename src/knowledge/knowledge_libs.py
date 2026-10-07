@@ -1,9 +1,10 @@
-"""内置分析知识库的种子装载与召回（绘图模板/统计方法/期刊规范/学科教材）。
+"""内置分析知识库的种子装载与召回（绘图模板/统计方法/期刊规范/学科教材/实验设计）。
 
-4 个库以 markdown 种子文件（``data/knowledge_libs/*.md``）维护，每个 ``## ``
+5 个库以 markdown 种子文件（``data/knowledge_libs/*.md``）维护，每个 ``## ``
 小节切为一块，写入现有 KB 双区基建的独立命名空间 ``kb:lib:{name}``（见
 ``kb.KB_LIBRARIES``）：与用户 KB（team/personal）互不可见，不污染 ``list_files``
-与 GraphRAG 的文献问答合并检索。
+与 GraphRAG 的文献问答合并检索。召回集由调用方指定：``DEFAULT_LIBRARIES``
+（数据分析 4 库）或 ``DESIGN_LIBRARIES``（实验设计 3 库）。
 
 - ``ensure_seeded`` 幂等：``add_chunks`` 内置块级 sha256 去重，重复调用零新增；
 - ``recall`` 向量检索失败（BGE 未就绪/索引为空）时自动降级为关键词扫描种子
@@ -29,6 +30,7 @@ LIB_LABELS: dict[str, str] = {
     "methods": "统计方法库",
     "journal": "期刊规范库",
     "textbook": "学科教材库",
+    "design": "实验设计库",
 }
 
 LIB_SCOPES: list[str] = [f"kb:lib:{lib}" for lib in LIB_LABELS]
@@ -39,7 +41,14 @@ LIB_FILES: dict[str, str] = {
     "methods": "statistical_methods.md",
     "journal": "journal_specs.md",
     "textbook": "textbook_notes.md",
+    "design": "design_priors.md",
 }
+
+#: 数据分析（默认召回集）：4 个面向数据分析的库
+DEFAULT_LIBRARIES: list[str] = ["plotting", "methods", "journal", "textbook"]
+
+#: 实验设计（设计器召回集）：先验区间 + 统计功效 + 方法论教材
+DESIGN_LIBRARIES: list[str] = ["design", "methods", "textbook"]
 
 _MAX_CHUNK_CHARS = 900
 _HEADING_RE = re.compile(r"^##\s+(.+)$", re.MULTILINE)
@@ -144,15 +153,15 @@ def _format_chunk(library: str, hit: dict, similarity: float) -> dict:
     }
 
 
-def _empty_libraries() -> dict[str, dict]:
-    return {lib: {"label": LIB_LABELS[lib], "chunks": []} for lib in LIB_LABELS}
+def _empty_libraries(libs: list[str]) -> dict[str, dict]:
+    return {lib: {"label": LIB_LABELS[lib], "chunks": []} for lib in libs}
 
 
-def _keyword_libraries(intent: str, top_k: int) -> dict[str, dict]:
+def _keyword_libraries(intent: str, top_k: int, libs: list[str]) -> dict[str, dict]:
     """关键词回退：按字符二元组/词重叠给种子小节打分，零命中取前 2 节。"""
     query_terms = _terms(intent)
-    libraries = _empty_libraries()
-    for library in LIB_LABELS:
+    libraries = _empty_libraries(libs)
+    for library in libs:
         path = Path(seed_path(library))
         if not path.is_file():
             continue
@@ -172,24 +181,30 @@ def _keyword_libraries(intent: str, top_k: int) -> dict[str, dict]:
     return libraries
 
 
-def recall(intent: str, profile: dict | None = None, top_k: int | None = None) -> dict:
-    """召回 4 个内置知识库的相关块。
+def recall(
+    intent: str,
+    profile: dict | None = None,
+    top_k: int | None = None,
+    libraries: list[str] | None = None,
+) -> dict:
+    """召回内置知识库的相关块（``libraries=None`` 时用数据分析默认 4 库）。
 
     Returns:
         ``{query, libraries: {lib: {label, chunks: [{section, text, source,
         similarity}]}}, degraded, sources}``；向量通道不可用时 degraded=True
         且 chunks 来自种子文件关键词扫描。
     """
+    libs = list(libraries) if libraries else list(DEFAULT_LIBRARIES)
     k = top_k or get_settings().analysis.recall_top_k
     query = _augment_query(intent, profile)
     degraded = False
-    libraries = _empty_libraries()
+    out = _empty_libraries(libs)
     try:
         ensure_seeded()
         hits = 0
-        for library in LIB_LABELS:
+        for library in libs:
             for hit in kb.query_chunks(query, scopes=[lib_scope(library)], top_k=k):
-                libraries[library]["chunks"].append(
+                out[library]["chunks"].append(
                     _format_chunk(library, hit, hit.get("similarity", 0.0))
                 )
                 hits += 1
@@ -198,10 +213,10 @@ def recall(intent: str, profile: dict | None = None, top_k: int | None = None) -
     except Exception as exc:
         logger.warning("知识库向量召回失败，退化为关键词扫描: %s", exc)
         degraded = True
-        libraries = _keyword_libraries(query if query else intent, k)
+        out = _keyword_libraries(query if query else intent, k, libs)
     return {
         "query": intent,
-        "libraries": libraries,
+        "libraries": out,
         "degraded": degraded,
-        "sources": sum(len(v["chunks"]) for v in libraries.values()),
+        "sources": sum(len(v["chunks"]) for v in out.values()),
     }

@@ -1,15 +1,20 @@
-"""Academic Reviewer Agent v2.0 — 增强学术审稿智能体 with IMRaD + format compliance."""
+"""Academic Reviewer Agent v3.0 — 逐段定位审查 + IMRaD + 格式合规 + 本地查重自检.
+
+审稿人对稿件只输出建议，绝不改稿；所有 findings 附带原文定位（章节/段落），
+配合 deterministic checks（引用标记/相似度自检）生成逐段审查报告。
+"""
 
 import json
 import logging
 import re
 
+from src.agents.academic_reviewer import checks
 from src.agents.base import AgentResult, BaseAgent
 from src.tools.paper_schema import make_paper_id
 
 logger = logging.getLogger(__name__)
 
-REVIEW_PROMPT_V2 = """你是一位资深学术审稿人。请对以下论文草稿进行严格审阅，返回JSON。
+REVIEW_PROMPT_V3 = """你是一位资深学术审稿人。请对以下论文草稿进行严格审阅，返回JSON。
 
 论文草稿:
 {draft}
@@ -22,6 +27,7 @@ REVIEW_PROMPT_V2 = """你是一位资深学术审稿人。请对以下论文草�
 5. 格式合规: 是否符合{style}格式规范
 6. 语言质量: 学术语言是否规范
 7. 创新性评估: 与现有文献对比的创新程度
+8. AI参与标注: 涉及AI生成/辅助而未注明"AI辅助"的段落记为"AI标注"问题
 
 返回JSON（不要markdown代码块）:
 {{
@@ -34,17 +40,35 @@ REVIEW_PROMPT_V2 = """你是一位资深学术审稿人。请对以下论文草�
     "format": {{"score": 0-100, "style": "{style}", "issues": [], "suggestions": []}},
     "language": {{"score": 0-100, "issues": [], "suggestions": []}},
     "novelty": {{"score": 0-100, "assessment": ""}},
+    "paragraph_issues": [
+        {{
+            "type": "引用格式|学术表达|数据完整性|逻辑一致性|AI标注",
+            "severity": "high|medium|low",
+            "quote": "从草稿中逐字摘录的连续片段（≤40字）",
+            "description": "问题说明",
+            "suggestion": "具体修改建议"
+        }}
+    ],
     "strengths": ["优点1"],
     "weaknesses": ["缺点1"],
     "summary": "总体评审意见（中文，300字以内）",
     "detailed_comments": "逐段详细意见",
     "revision_checklist": ["修改项1", "修改项2"]
-}}"""
+}}
+
+paragraph_issues 硬性要求（用于生成逐段审查报告与原文定位）:
+- 5-15 条：按段落逐一核对，无问题的段落不要编造问题；每段最多 2 条
+- quote 必须逐字出现在草稿正文中；若原文含 ** ## 等标记，摘录时去掉标记但保持文字连续
+- 系统会校验 quote 与原文的匹配，无法定位的问题会被丢弃
+- 不确定是否违规时选择"建议"（low）而非高严重度；只有明确违规（如引用编号越界、未标注AI生成内容）用 high"""
 
 
 class AcademicReviewerAgent(BaseAgent):
     name = "academic_reviewer"
-    description = "学术审稿智能体 v2.0 — IMRaD结构检查 + 逻辑一致性 + 引用完整性 + 格式合规(APA/MLA/GB/T 7714)"
+    description = (
+        "学术审稿智能体 v3.0 — 逐段定位审查 + IMRaD结构检查 + 逻辑一致性 + "
+        "引用完整性 + 格式合规(APA/MLA/GB/T 7714) + 本地查重自检"
+    )
     model_role = "deep_reasoning"
 
     async def _execute_impl(self, state: dict) -> AgentResult:
@@ -67,7 +91,7 @@ class AcademicReviewerAgent(BaseAgent):
         # Count citation markers for context
         num_citations = len(re.findall(r"\[\d+\]", draft))
 
-        prompt = REVIEW_PROMPT_V2.format(
+        prompt = REVIEW_PROMPT_V3.format(
             draft=draft[:12000], style=style, num_citations=num_citations
         )
         resp = await self._call_llm(prompt)
@@ -75,7 +99,8 @@ class AcademicReviewerAgent(BaseAgent):
         review = self._parse_review(resp)
 
         # 规格④引用溯源：草稿中的 [n] 标记回溯到检索到的论文（KG Paper 身份）
-        trace = self._trace_citations(draft, state.get("literature_results") or [])
+        papers = state.get("literature_results") or []
+        trace = self._trace_citations(draft, papers)
         citations_block = review.get("citations")
         if not isinstance(citations_block, dict):
             citations_block = {}
@@ -86,11 +111,29 @@ class AcademicReviewerAgent(BaseAgent):
             [*existing_missing, *(f"[{n}] 无对应文献" for n in trace["unresolved"])]
         ))
         review["citations"] = citations_block
+        review["citation_trace"] = trace
+
+        # ---- 逐段问题：LLM findings（quote 校验 + 定位）+ 确定性检查 ----
+        reviewer_issues = checks.normalize_llm_issues(review.pop("paragraph_issues", []), draft)
+        deterministic = checks.detect_citation_issues(draft, len(papers))
+        similarity = checks.similarity_self_check(draft, papers)
+        deterministic.extend(checks.similarity_issues(similarity))
+
+        issues = checks.merge_issues(deterministic, reviewer_issues, draft)
+        review["issues"] = issues
+        review["similarity"] = similarity
+        review["stats"] = checks.build_stats(issues, similarity)
+        review["style"] = style
+
         self._audit("citation_trace", {
             "resolved": len(trace["resolved"]),
             "unresolved": len(trace["unresolved"]),
         })
-
+        self._audit("paragraph_issues", {
+            "total": len(issues),
+            "located": len([i for i in issues if i.get("located")]),
+            "similarity_pct": similarity.get("pct"),
+        })
         self._audit("review_complete", {"overall_score": review.get("overall_score", 0)})
 
         return AgentResult(
@@ -149,6 +192,7 @@ class AcademicReviewerAgent(BaseAgent):
                 },
                 "language": {"score": 60, "issues": [], "suggestions": []},
                 "novelty": {"score": 60, "assessment": ""},
+                "paragraph_issues": [],
                 "strengths": [],
                 "weaknesses": [],
                 "detailed_comments": resp[:500],

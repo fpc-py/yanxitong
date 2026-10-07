@@ -72,7 +72,7 @@ class TestAcademicReviewerV2:
         from src.agents.academic_reviewer.agent import AcademicReviewerAgent
         agent = AcademicReviewerAgent()
         assert agent.name == "academic_reviewer"
-        assert "v2.0" in agent.description
+        assert "v3.0" in agent.description
 
     def test_parse_review_valid_json(self):
         from src.agents.academic_reviewer.agent import AcademicReviewerAgent

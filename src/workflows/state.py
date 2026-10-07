@@ -111,7 +111,7 @@ class ResearchState(TypedDict):
     research_topic: str
 
     # --- Task management ------------------------------------------------------
-    current_phase: Literal["literature", "knowledge_graph", "experiment", "writing"]
+    current_phase: Literal["literature", "knowledge_graph", "experiment", "writing", "design", "data_analysis"]
     task_queue: Annotated[list[dict[str, Any]], operator.add]
     completed_tasks: Annotated[list[dict[str, Any]], operator.add]
 
@@ -145,6 +145,7 @@ class ResearchState(TypedDict):
     # （历史 bug：data_file_path 被丢弃，导致数据分析误判为「无数据」而自己造样本）。
     data_file_path: str
     data_profile: Optional[dict[str, Any]]           # 沙箱画像（① Schema/质量报告），/profile 端点写入
+    experiment_config: Optional[dict[str, Any]]      # 用户当前实验配置（模型/超参/数据/资源），/design 端点写入
     writing_section: str
     citation_style: str
 
@@ -193,6 +194,7 @@ def create_initial_state(
         error_message=None,
         data_file_path="",
         data_profile=None,
+        experiment_config=None,
         writing_section="",
         citation_style="",
     )

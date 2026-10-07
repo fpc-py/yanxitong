@@ -214,6 +214,7 @@ class KGBuilderConfig(_EnvFirstConfig):
             "Finding",
             "Author",
             "Venue",
+            "Experiment",
         ]
     )
     """Closed set of entity labels the extractor is allowed to emit."""
@@ -232,6 +233,7 @@ class KGBuilderConfig(_EnvFirstConfig):
             "APPLIED_TO",
             "CITES",
             "CONTRADICTS",
+            "ACHIEVES",
         ]
     )
     """Closed set of relation types the extractor is allowed to emit."""
@@ -298,6 +300,45 @@ class AnalysisConfig(_EnvFirstConfig):
 
     profile_timeout: int = 15
     """Wall-clock seconds allowed for the in-sandbox profiling script."""
+
+
+class DesignerConfig(_EnvFirstConfig):
+    """Experiment Designer engine: evidence recall, optimisation and packaging budget."""
+
+    model_config = SettingsConfigDict(env_prefix="DESIGNER_", populate_by_name=True, extra="ignore")
+
+    max_runs: int = 5
+    """How many packaged design runs are kept per session on disk."""
+
+    recall_top_k: int = 6
+    """Chunks retrieved per knowledge library (incl. the design/prior library)."""
+
+    n_trials: int = 64
+    """Optuna trial budget for the multi-objective hyper-parameter search."""
+
+    top_k: int = 3
+    """How many ranked candidates are surfaced as recommendations (Top-K)."""
+
+    deep_verify: bool = True
+    """Whether the LLM review pass (claim-evidence consistency) runs."""
+
+    max_gpu_hours: float = 24.0
+    """Default GPU-hour budget used for resource pruning when the user declares none."""
+
+    max_memory_gb: float = 16.0
+    """Default memory budget (GB) used for resource pruning when unspecified."""
+
+    weights: dict[str, float] = Field(
+        default_factory=lambda: {
+            "performance": 0.40,
+            "cost": 0.18,
+            "time": 0.12,
+            "interpretability": 0.10,
+            "risk": 0.12,
+            "complexity": 0.08,
+        }
+    )
+    """Ranking weights over the six objectives (sum need not be exactly 1; normalised on use)."""
 
 
 class SafetyConfig(_EnvFirstConfig):
@@ -452,6 +493,7 @@ class Settings(BaseSettings):
     kb: KBConfig = Field(default_factory=KBConfig)
     kg: KGBuilderConfig = Field(default_factory=KGBuilderConfig)
     analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
+    designer: DesignerConfig = Field(default_factory=DesignerConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
