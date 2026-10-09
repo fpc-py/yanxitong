@@ -1,10 +1,19 @@
-"""Docker-based code execution sandbox + MockSandbox fallback for Phase 2."""
+"""Docker-based code execution sandbox.
 
-import asyncio, base64, logging, re, shutil, sys, subprocess, tempfile
+Security posture (v3.0): the in-process ``MockSandbox`` executes LLM-generated
+code directly on the host and is therefore NOT a safe fallback. It is only
+constructed when (a) pytest is running, or (b) the operator explicitly opts
+in via ``YXT_ALLOW_MOCK_SANDBOX=1``. In any other environment, if the Docker
+daemon is unreachable, :func:`get_sandbox` raises
+:class:`SandboxUnavailableError` so callers return 503 / failed results
+instead of silently running untrusted code on the host.
+"""
+
+import asyncio, base64, logging, os, re, shutil, sys, subprocess, tempfile
 from pathlib import Path
 from typing import Optional
 from src.core.config import get_settings
-from src.core.exceptions import SandboxError
+from src.core.exceptions import SandboxError, SandboxUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -308,14 +317,63 @@ class MockSandbox:
 
 _sandbox = None
 
+
+def _mock_sandbox_allowed() -> bool:
+    """True only when the in-process sandbox is explicitly sanctioned.
+
+    Two opt-in channels:
+      1. ``YXT_ALLOW_MOCK_SANDBOX=1`` in the environment (local dev / demos
+         that deliberately accept the risk);
+      2. pytest is running (``PYTEST_CURRENT_TEST`` is set, or the pytest
+         module is already imported).
+    """
+    if os.environ.get("YXT_ALLOW_MOCK_SANDBOX") == "1":
+        return True
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return True
+    return "pytest" in sys.modules
+
+
 def get_sandbox():
+    """Return the configured code sandbox.
+
+    Raises:
+        SandboxUnavailableError: Docker is unreachable AND the in-process
+            fallback is not permitted by the environment. Callers must turn
+            this into a 503 / failed result -- never run LLM-generated code
+            on the host.
+    """
     global _sandbox
-    if _sandbox is None:
-        try:
-            subprocess.run(["docker", "info"], capture_output=True, timeout=5, check=False)
-            _sandbox = DockerSandbox()
-            logger.info("Docker sandbox available")
-        except Exception:
-            logger.warning("Docker not available, using MockSandbox (no container isolation!)")
-            _sandbox = MockSandbox()
-    return _sandbox
+    if _sandbox is not None:
+        return _sandbox
+
+    docker_ok = False
+    try:
+        proc = subprocess.run(
+            ["docker", "info"], capture_output=True, timeout=5, check=False,
+        )
+        docker_ok = proc.returncode == 0
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Docker daemon probe failed: %s", exc)
+        docker_ok = False
+
+    if docker_ok:
+        _sandbox = DockerSandbox()
+        logger.info("Docker sandbox available")
+        return _sandbox
+
+    if _mock_sandbox_allowed():
+        _sandbox = MockSandbox()
+        logger.warning(
+            "Docker unavailable -- using MockSandbox (in-process, NO container "
+            "isolation). Only permitted because pytest is running or "
+            "YXT_ALLOW_MOCK_SANDBOX=1 is set."
+        )
+        return _sandbox
+
+    raise SandboxUnavailableError(
+        "Docker daemon is not reachable, and the in-process mock sandbox is "
+        "disabled in this environment (it would run AI-generated Python code "
+        "directly on the host). Start Docker, or set YXT_ALLOW_MOCK_SANDBOX=1 "
+        "explicitly if you accept that risk."
+    )

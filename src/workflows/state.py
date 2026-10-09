@@ -112,8 +112,6 @@ class ResearchState(TypedDict):
 
     # --- Task management ------------------------------------------------------
     current_phase: Literal["literature", "knowledge_graph", "experiment", "writing", "design", "data_analysis"]
-    task_queue: Annotated[list[dict[str, Any]], operator.add]
-    completed_tasks: Annotated[list[dict[str, Any]], operator.add]
 
     # --- Phase outputs ----------------------------------------------------------
     literature_results: list[dict[str, Any]]       # PaperSummary as dicts.
@@ -137,6 +135,8 @@ class ResearchState(TypedDict):
 
     # --- Messages --------------------------------------------------------------------
     user_query: str
+    intent: Optional[str]                        # 入口路由 LLM 分类结果（lit/data/design/write/review）
+    intent_confidence: float                     # 分类置信度，<0.6 时路由已回退关键词
     final_response: Optional[str]
     error_message: Optional[str]
 
@@ -183,8 +183,8 @@ def create_initial_state(
         kb_id=kb_id or "default",
         cross_kb_ids=[str(x) for x in (cross_kb_ids or []) if str(x).strip()],
         current_phase="literature",
-        task_queue=[],
-        completed_tasks=[],
+        intent=None,
+        intent_confidence=0.0,
         literature_results=[],
         literature_conflicts=[],
         research_gaps=[],

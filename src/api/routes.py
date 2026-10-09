@@ -607,8 +607,12 @@ _DEFENSE_LAYERS = [
 @router.get("/system/capabilities", response_model=SystemCapabilities)
 async def system_capabilities():
     """平台可信架构能力：沙箱模式、六道防线激活状态、最近一次链路追踪 ID。"""
-    sandbox = get_sandbox()
-    mode = "docker" if isinstance(sandbox, DockerSandbox) else "mock"
+    try:
+        sandbox = get_sandbox()
+        mode = "docker" if isinstance(sandbox, DockerSandbox) else "mock"
+    except Exception as e:  # SandboxUnavailableError：展示为 unavailable，不要让 capabilities 端点 500
+        logger.warning("Sandbox probe degraded on capabilities endpoint: %s", e)
+        mode = "unavailable"
     return SystemCapabilities(
         sandbox_mode=mode,
         defenses=[DefenseItem(**d) for d in _DEFENSE_LAYERS],

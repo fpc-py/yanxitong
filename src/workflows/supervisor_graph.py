@@ -1,10 +1,10 @@
 # Workflow definitions v3.0 — supervisor graph with full 5-link chain: find→read→compute→write→review.
 
-import asyncio
-import logging
+import asyncio, json, logging
 from typing import Literal
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.workflows.state import ResearchState
 from src.workflows import tracing
@@ -17,6 +17,78 @@ from src.agents.experiment_designer.agent import ExperimentDesignerAgent
 from src.agents.writing_assistant.agent import WritingAssistantAgent
 
 logger = logging.getLogger(__name__)
+
+# 显式端点阶段 → 入口节点映射（这些是 /analyze、/design、/write、/review 等
+# 独立端点直接设定的 phase，意图明确，不经过 LLM 分类）。
+_EXPLICIT_PHASE_ENTRY = {
+    "data_analysis": "data_analyst",
+    "design": "experiment_designer",
+    "review": "academic_reviewer",
+    "writing": "writing",
+}
+
+# LLM 意图分类标签 → 入口节点
+_INTENT_TO_NODE = {
+    "literature_search": "retrieve",
+    "data_analysis": "data_analyst",
+    "experiment_design": "experiment_designer",
+    "writing": "writing",
+    "review": "academic_reviewer",
+}
+
+_INTENT_PROMPT = """You are an intent classifier for an academic research assistant.
+Classify the user query into exactly ONE category:
+- literature_search: asking to search / summarize / compare papers, literature landscape
+- data_analysis: asking to analyze a dataset, produce charts / statistics from data
+- experiment_design: asking to design / optimize an experiment or hyperparameters
+- writing: asking to draft / write a paper section
+- review: asking to review / critique an existing draft
+Reply ONLY JSON: {"intent": "<one of the above>", "confidence": 0.0~1.0}
+Query: """
+
+
+async def _llm_classify_intent(query: str) -> tuple[str | None, float]:
+    """Lightweight LLM intent classification; (None, 0.0) on any failure.
+
+    Uses the lightweight model role with hidden-thinking disabled (the model
+    is a reasoning model that would otherwise burn the whole token budget on
+    internal CoT).
+    """
+    if not query or len(query.strip()) < 2:
+        return None, 0.0
+    try:
+        from src.core.llm_factory import get_llm
+
+        llm = get_llm("lightweight").bind(
+            response_format={"type": "json_object"},
+            extra_body={"enable_thinking": False},
+        )
+        resp = await llm.ainvoke([
+            SystemMessage(content="You are a fast intent classifier. Reply JSON only."),
+            HumanMessage(content=_INTENT_PROMPT + query[:400]),
+        ])
+        text = resp.content if isinstance(resp.content, str) else str(resp.content)
+        data = json.loads(text.strip().strip("`").strip())
+        intent = str(data.get("intent", "")).strip()
+        conf = float(data.get("confidence", 0.0))
+        if intent in _INTENT_TO_NODE:
+            return intent, conf
+    except Exception as e:
+        logger.warning("LLM intent classification degraded to keywords: %s", e)
+    return None, 0.0
+
+
+def _keyword_intent(query: str) -> str:
+    """Legacy keyword fallback (kept as the low-confidence / error path)."""
+    if any(w in query for w in ["写论文", "生成论文", "撰写", "draft", "写作", "写摘要", "写引言"]):
+        return "writing"
+    if any(w in query for w in ["审稿", "审阅", "修改论文", "论文评审", "review", "评审"]):
+        return "review"
+    if any(w in query for w in ["分析数据", "数据分析", "统计", "csv", "图表", "可视化", "analyze"]):
+        return "data_analysis"
+    if any(w in query for w in ["实验设计", "实验方案", "假设", "验证方案", "experiment design"]):
+        return "experiment_design"
+    return "literature_search"
 
 
 async def retrieve_node(state: ResearchState) -> ResearchState:
@@ -236,33 +308,41 @@ def route_after_writing(state: ResearchState) -> Literal["academic_reviewer", "s
     return "supervisor"
 
 
-def route_intent(state: ResearchState) -> Literal["retrieve", "data_analyst", "experiment_designer", "writing", "academic_reviewer", "supervisor"]:
-    query = state.get("user_query", "").lower()
+async def route_intent(state: ResearchState) -> Literal[
+    "retrieve", "data_analyst", "experiment_designer",
+    "writing", "academic_reviewer", "supervisor",
+]:
+    """Entry router: explicit endpoint phase wins; otherwise LLM intent with keyword fallback.
+
+    - ``/analyze``/``/design``/``/write``/``/review`` 等独立端点直接设定 phase，
+      意图明确，直达对应节点，不消耗 LLM 分类。
+    - 默认 literature 阶段：先跑一次 lightweight LLM 分类；置信度 ≥0.6 直接采用，
+      否则（或调用失败）回退关键词表。分类结果写回 state 供 supervisor 节点审计，
+      避免重复调一次 LLM。
+    """
     phase = state.get("current_phase", "")
+    if phase in _EXPLICIT_PHASE_ENTRY:
+        return _EXPLICIT_PHASE_ENTRY[phase]
 
-    if phase == "experiment":
-        return "data_analyst"
-    if phase == "data_analysis":
-        return "data_analyst"
-    if phase == "design":
-        return "experiment_designer"
-    # /review 直达审稿节点：绝不重跑写作，避免新生成草稿覆盖用户提交的待审稿
-    if phase == "review":
-        return "academic_reviewer"
-    if phase == "writing":
-        return "writing"
+    query = state.get("user_query", "") or ""
+    intent, conf = await _llm_classify_intent(query)
+    if conf >= 0.6 and intent:
+        state["intent"] = intent
+        state["intent_confidence"] = conf
+        node = _INTENT_TO_NODE.get(intent, "retrieve")
+        logger.info("Intent route (LLM): %s conf=%.2f -> %s", intent, conf, node)
+        return node
 
-    if any(w in query for w in ["写论文", "生成论文", "撰写", "draft", "写作", "写摘要", "写引言"]):
-        return "writing"
-    if any(w in query for w in ["审稿", "审阅", "修改论文", "论文评审", "review", "评审"]):
-        return "academic_reviewer"
-    if any(w in query for w in ["分析数据", "数据分析", "统计", "csv", "图表", "可视化", "analyze"]):
-        return "data_analyst"
-    if any(w in query for w in ["实验设计", "实验方案", "假设", "验证方案", "experiment design"]):
-        return "experiment_designer"
-    if not state.get("literature_results"):
-        return "retrieve"
-    return "supervisor"
+    # 低置信 / 调用失败：关键词回退
+    kw = _keyword_intent(query.lower())
+    state["intent"] = kw
+    state["intent_confidence"] = conf
+    logger.info("Intent route (keyword fallback): %s", kw)
+    node = _INTENT_TO_NODE.get(kw, "retrieve")
+    # 已有文献结果时，非数据/设计/写作/审稿意图直接进 supervisor 做 RAG 问答
+    if node == "retrieve" and state.get("literature_results"):
+        return "supervisor"
+    return node
 
 
 def build_supervisor_graph() -> StateGraph:

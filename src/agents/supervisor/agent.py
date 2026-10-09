@@ -1,17 +1,12 @@
-"""Supervisor Agent v2.0 — enhanced with Phase 4 quality gate integration."""
+"""Supervisor Agent v3.0 — GraphRAG answer generation + six-layer quality gate."""
 
-import json, logging
+import logging
 from src.agents.base import BaseAgent, AgentResult
 from src.knowledge.graphrag import get_graphrag
-from src.safety.hallucination import get_hallucination_defense, HallucinationReport
+from src.safety.hallucination import get_hallucination_defense
 from src.safety.citation import get_citation_tracker
 
 logger = logging.getLogger(__name__)
-
-# 字面量 JSON 花括号需转义为 {{ }}，否则 str.format() 会把它当占位符而抛 KeyError，
-# 导致意图识别每次都静默退化为默认值。
-INTENT_PROMPT = """Analyze the user query and determine intent type. Return JSON: {{"intent":"literature_search|knowledge_graph_query|data_analysis|writing_review|comprehensive","confidence":0.9}}
-Query: {query}"""
 
 QA_PROMPT = """You are a research assistant. Answer based ONLY on the provided literature (papers and uploaded knowledge-base excerpts labeled [KB:...]). Cite every claim with [1],[2] etc. If unsure, clearly state so. Be academic and concise.
 
@@ -25,7 +20,7 @@ Answer:"""
 
 class SupervisorAgent(BaseAgent):
     name = "supervisor"
-    description = "总协调智能体 v2.0 — 意图识别 + Phase 4 六道幻觉防线质量门禁"
+    description = "总协调智能体 v3.0 — GraphRAG 答案生成 + 六道幻觉防线质量门禁"
     model_role = "supervisor"
 
     async def _execute_impl(self, state: dict) -> AgentResult:
@@ -35,18 +30,11 @@ class SupervisorAgent(BaseAgent):
 
         self._audit("supervisor_start", {"query": query[:200]})
 
-        # Intent analysis
-        try:
-            resp = await self._call_llm(INTENT_PROMPT.format(query=query))
-            resp = resp.strip()
-            if resp.startswith("```"):
-                resp = resp.split("\n", 1)[-1]
-                if resp.endswith("```"):
-                    resp = resp[:-3]
-                resp = resp.strip()
-            intent = json.loads(resp)
-        except Exception:
-            intent = {"intent": "comprehensive", "confidence": 0.5}
+        # 意图分类已在入口 route_intent 完成（LLM 或关键词回退），这里只读不重复调用。
+        intent = {
+            "intent": state.get("intent") or "literature_search",
+            "confidence": state.get("intent_confidence", 0.0),
+        }
         self._audit("intent", intent)
 
         papers = state.get("literature_results", [])

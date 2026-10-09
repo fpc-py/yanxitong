@@ -3,8 +3,6 @@
 .env.*
 !.env.example
 
-研析通v2.0_完整方案.md
-
 # --- 模型权重（约 2.3GB，可重新下载，不上传）-------------------
 # 重新下载：
 #   $env:HF_ENDPOINT = "https://hf-mirror.com"

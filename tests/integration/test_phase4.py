@@ -1,4 +1,4 @@
-"""Integration tests for Phase 4: Hallucination Defense + Safety + RBAC."""
+﻿"""Integration tests for Phase 4: Hallucination Defense + Safety + RBAC."""
 
 import pytest, sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -190,8 +190,8 @@ class TestQualityGateIntegration:
     def test_supervisor_has_quality_gate(self):
         from src.agents.supervisor.agent import SupervisorAgent
         agent = SupervisorAgent()
-        assert "v2.0" in agent.description
-        assert "Phase 4" in agent.description
+        assert "v3.0" in agent.description
+        assert "质量门禁" in agent.description
 
 
 class TestSafetyModuleConsistency:

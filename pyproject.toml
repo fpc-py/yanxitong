@@ -1,5 +1,5 @@
 # =============================================================================
-# 研析通 (YanXiTong) v2.0 — Academic Research Multi-Agent System
+# 研析通 (YanXiTong) v3.0 — Academic Research Multi-Agent System
 # Python 3.12 project definition
 # =============================================================================
 
@@ -9,8 +9,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yanxitong"
-version = "2.0.0"
-description = "研析通 v2.0 — LangGraph-based multi-agent academic research system with hybrid RAG, Neo4j knowledge graph, sandboxed data analysis, and full observability."
+version = "3.0.0"
+description = "研析通 v3.0 — LangGraph-based multi-agent academic research system with hybrid RAG, Neo4j knowledge graph, sandboxed data analysis, and full observability."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }

@@ -30,49 +30,30 @@ class EvalResult:
     overall: float
 
 
-# Golden test set: 20 QA pairs (can expand to 50)
-GOLDEN_SET = [
-    {
-        "question": "What is BERT and how does it work?",
-        "reference": "BERT is a bidirectional transformer model that pre-trains deep bidirectional representations by jointly conditioning on both left and right context in all layers.",
-    },
-    {
-        "question": "What is GraphRAG?",
-        "reference": "GraphRAG combines knowledge graphs with retrieval-augmented generation to improve factual accuracy by using structured knowledge alongside vector search.",
-    },
-    {
-        "question": "How does FAISS enable efficient similarity search?",
-        "reference": "FAISS uses product quantization and inverted file indexing to enable efficient billion-scale nearest neighbor search on dense vectors.",
-    },
-    {
-        "question": "What is the difference between RAG and GraphRAG?",
-        "reference": "RAG uses vector similarity search over document embeddings, while GraphRAG adds knowledge graph traversal to retrieve structured entity relationships alongside vector results.",
-    },
-    {
-        "question": "What is a LangGraph StateGraph?",
-        "reference": "A LangGraph StateGraph is a state machine where nodes process a shared typed state and edges define conditional or unconditional transitions between processing steps.",
-    },
-    {
-        "question": "What is the purpose of hallucination detection in LLMs?",
-        "reference": "Hallucination detection identifies when LLMs generate content not grounded in source documents, using methods like retrieval scope checking, citation anchoring, and knowledge graph verification.",
-    },
-    {
-        "question": "How does a circuit breaker pattern improve system reliability?",
-        "reference": "A circuit breaker prevents cascading failures by monitoring failure counts and temporarily stopping calls to failing services, allowing them time to recover.",
-    },
-    {
-        "question": "What is the IMRaD structure in academic papers?",
-        "reference": "IMRaD stands for Introduction, Methods, Results, and Discussion — the standard structure for organizing scientific research papers.",
-    },
-    {
-        "question": "What is BGE-M3 embedding model?",
-        "reference": "BGE-M3 is a multilingual embedding model from BAAI that supports dense, sparse, and multi-vector retrieval across 100+ languages with 1024-dimensional vectors.",
-    },
-    {
-        "question": "What makes Docker sandbox execution safe for code analysis?",
-        "reference": "Docker sandboxes provide network isolation, memory limits, CPU constraints, read-only filesystems, and tmpfs mounts to safely execute untrusted code without affecting the host system.",
-    },
-]
+# Golden test set: 从 goldset.json 加载（30+ 条，覆盖中/英/数字/库外拒答/路由）。
+# 字段映射：query→question, reference_facts 拼成 reference 文本。
+_GOLDSET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "goldset.json")
+
+
+def _load_golden_set() -> list[dict]:
+    if not os.path.exists(_GOLDSET_PATH):
+        return []
+    with open(_GOLDSET_PATH, encoding="utf-8") as f:
+        data = json.load(f)
+    out = []
+    for s in data.get("samples", []):
+        out.append({
+            "id": s.get("id", ""),
+            "question": s["query"],
+            "reference": "; ".join(s.get("reference_facts", [])),
+            "type": s.get("type", "literature"),
+            "must_refuse": s.get("must_refuse", False),
+            "expected_route": s.get("expected_route", "lit"),
+        })
+    return out
+
+
+GOLDEN_SET = _load_golden_set()
 
 
 class RAGASEvaluator:

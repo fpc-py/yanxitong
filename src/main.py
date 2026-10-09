@@ -1,4 +1,4 @@
-"""研析通 v2.0 — Application entry point."""
+"""研析通 v3.0 — Application entry point."""
 
 import asyncio
 import logging, os
@@ -43,18 +43,22 @@ async def _warmup_encoders() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    logger.info("研析通 v2.0 starting on %s:%s", settings.app.host, settings.app.port)
+    logger.info("研析通 v3.0 starting on %s:%s", settings.app.host, settings.app.port)
     setup_tracing()
     asyncio.create_task(_warmup_encoders())
     yield
     from src.auth.store import close_auth_store
     await close_auth_store()
-    logger.info("研析通 v2.0 shutting down")
+    logger.info("研析通 v3.0 shutting down")
 
 
-app = FastAPI(title="研析通 v2.0", version="3.0.0", lifespan=lifespan)
+app = FastAPI(title="研析通 v3.0", version="3.0.0", lifespan=lifespan)
 
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+# CORS：默认仅前端 dev 服务器；生产用 YXT_CORS_ORIGINS=https://your-domain.com 逗号分隔注入。
+# 不再 allow_origins=["*"]——配合 allow_credentials=True 时浏览器本就拒绝通配。
+_cors_env = os.environ.get("YXT_CORS_ORIGINS", "http://localhost:4321,http://127.0.0.1:4321")
+_cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins, allow_credentials=True, allow_methods=["GET","POST","PUT","DELETE"], allow_headers=["Authorization","Content-Type","X-Anon-Id"])
 app.add_middleware(RateLimitMiddleware, requests_per_minute=get_settings().rate_limit.requests_per_minute)
 app.add_middleware(InputSanitizationMiddleware)
 
@@ -69,7 +73,7 @@ async def root():
     html_path = os.path.join(os.path.dirname(__file__), "..", "templates", "index.html")
     if os.path.exists(html_path):
         return HTMLResponse(open(html_path, encoding="utf-8").read())
-    return HTMLResponse("<h1>研析通 v2.0</h1><p>Frontend not found. Copy index.html to templates/</p>")
+    return HTMLResponse("<h1>研析通 v3.0</h1><p>Frontend not found. Copy index.html to templates/</p>")
 
 
 # ===== Prometheus =====

@@ -109,15 +109,21 @@ async def static_check(code: str, sandbox=None) -> dict:
     if syntax_ok:
         imports = parse_imports(code)
 
+    lock_text = ""
     if sandbox is None:
-        from src.tools.sandbox import get_sandbox
+        try:
+            from src.tools.sandbox import get_sandbox
 
-        sandbox = get_sandbox()
-    try:
-        lock_text = await sandbox.env_lock()
-    except Exception as exc:
-        logger.warning("static_check: env_lock 降级: %s", exc)
-        lock_text = ""
+            sandbox = get_sandbox()
+        except Exception as exc:  # SandboxUnavailableError：依赖清单为空，missing 全列出
+            logger.warning("static_check: sandbox unavailable, env packages unknown: %s", exc)
+            sandbox = None
+    if sandbox is not None:
+        try:
+            lock_text = await sandbox.env_lock()
+        except Exception as exc:
+            logger.warning("static_check: env_lock 降级: %s", exc)
+            lock_text = ""
     packages = env_packages(lock_text)
 
     stdlib = set(getattr(sys, "stdlib_module_names", set())) | {"__future__"}

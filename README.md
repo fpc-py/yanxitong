@@ -1,30 +1,36 @@
-# 研析通 v2.0
+# 研析通 v3.0
 
-> **AI 科研合伙人** — 以课题组文献库与实验记录为知识底座，构建 "KG×RAG 双引擎 + 分层多智能体协作 + 全链路可观测" 的 AI 科研系统，覆盖 "文献调研 → 知识构建 → 数据挖掘 → 实验设计 → 论文合规" 五大环节。
+> **AI 科研合伙人** — 以课题组文献库与实验记录为知识底座，构建 "KG×RAG 双引擎 + 多智能体协作 + 全链路可观测" 的 AI 科研系统，覆盖 "文献调研 → 知识构建 → 数据挖掘 → 实验设计 → 论文合规" 五大环节。
 
 ## 🎯 一句话定位
 
-研析通不是又一个 LLM 包装壳——我们用六道防线对抗幻觉、五层策略控制成本、Docker 沙箱保障安全执行、四层评估确保质量、全链路追踪实现可解释。这是一个真正可落地的、经过深度工程优化的 AI 科研合伙人系统。
+**帮研究生在 3 分钟内完成一次可溯源的文献调研**：输入一个研究问题，产出结构化文献矩阵、文献矛盾点、研究空白，每条结论可点回原文段落。数据分析、实验设计、论文审稿是这条主线上的延伸能力。
 
-## 🏗️ 系统架构
+> 辅助研究，不代替研究；辅助表达，不虚构内容。
+
+## 🏗️ 系统架构（与代码一致）
 
 ```
 ┌──────────────────────────────────────────────────────────┐
 │                  🎯 Supervisor Agent                      │
-│  意图识别 · 任务分解 · 资源路由 · 冲突仲裁 · 质量门禁       │
-└──────┬──────────┬──────────┬──────────┬─────────────────┘
-       │          │          │          │
-┌──────▼──┐ ┌─────▼───┐ ┌───▼────┐ ┌──▼──────────┐
-│🕵️ Retriever│ │🧠 KG    │ │📊 Data │ │📝 Academic │
-│  & Parser │ │ Builder │ │ Analyst│ │  Reviewer  │
-└──────┬────┘ └────┬────┘ └───┬────┘ └─────┬───────┘
-       │           │         │             │
-┌──────▼───────────▼─────────▼─────────────▼──────────────┐
-│              ⚙️ Tool & Resource Layer                    │
-│  Arxiv API │ Semantic Scholar │ Python Sandbox │ Neo4j │
-│  FAISS/BGE-M3 │ Redis Cache │ PDF Parser │ OTEL        │
-└─────────────────────────────────────────────────────────┘
+│  GraphRAG 上下文组装 · 答案生成 · 幻觉门禁 · 引用链       │
+└──────┬───────────────────────────────────┬───────────────┘
+       │                                   │
+┌──────▼───┐  ┌────────────┐  ┌──────────▼──────┐  ┌──────────────┐
+│ Retriever │  │ KG Builder │  │ Data Analyst    │  │ Experiment   │
+│ (arXiv /  │→│ (Neo4j 实  │  │ (Docker 沙箱 +  │  │ Designer     │
+│  S2 /     │  │  体/关系)  │  │  自动 Debug 闭环)│  │ (Optuna 多   │
+│  OpenAlex)│  └────────────┘  └─────────────────┘  │  目标优化)   │
+└──────────┘                                    └──────────────┘
+       ┌──────────────┐  ┌──────────────────┐
+       │ Writing Asst  │  │ Academic Reviewer │
+       └──────────────┘  └──────────────────┘
+       ──────────────── Tool & Resource Layer ────────────────
+       BGE-M3 (本地) · FAISS · Redis 语义缓存 · MySQL 账号配额
+       OpenTelemetry → Jaeger · Prometheus · Grafana
 ```
+
+> 说明：Supervisor 不做任务分解/动态调度——各能力由独立端点显式触发（`/analyze`、`/design`、`/write`、`/review`），Supervisor 专注于问答路径的 RAG 生成与质量门禁。这是有意的"少结构、多智能"取舍，详见 `docs/NEXT_PLAN.md`。
 
 ## 🚀 快速开始
 
@@ -34,8 +40,6 @@ echo "DASHSCOPE_API_KEY=your_key" > .env
 
 # 2. 安装依赖
 pip install -r requirements.txt
-
-#PyYAML 6.0.1 已经为 Windows 提供了预编译的 wheel 包，无需本地编译，完全绕开 Cython 和策略问题。
 
 # 3. 启动后端与依赖服务（MySQL 账号库映射到宿主 3309，避开本机 MySQL）
 docker compose up -d
@@ -78,19 +82,21 @@ curl http://localhost:8001/api/health
 
 ### 数据持久化
 
-- 账号 / 令牌 / 匿名配额在 MySQL，知识图谱在 Neo4j，语义缓存在 Redis（均容器卷持久化）。
+- 账号 / 令牌 / 匿名配额在 MySQL（宿主 3309），知识图谱在 Neo4j，语义缓存在 Redis（宿主 6380，均容器卷持久化）。
 - 会话状态（历史会话 / 引用链）、论文向量索引、上传文件落盘于 `data/`（compose 挂载 `app-data` 卷），后端重启后自动恢复。
 
-## 🛡️ 六道幻觉防线
+## 🛡️ 安全与质量门禁
 
 | 层 | 名称 | 说明 |
 |---|------|------|
-| 1 | 检索范围限定 | 声明必须能在源文献中找到对应内容 |
-| 2 | 引用锚定 | 每个观点必须标注引用来源 |
-| 3 | 知识图谱反验 | 声明与知识图谱事实交叉验证 |
-| 4 | 自一致性检查 | 检测回复内部的逻辑矛盾 |
-| 5 | 置信度评分 | 加权聚合评分，低于阈值标记 |
-| 6 | 人工熔断 | 高风险结论触发人工审核 |
+| 1 | 检索范围限定 | 回答只基于检索到的文献片段与 KB 块 |
+| 2 | 引用锚定 | 每个观点标注 `[n]` 引用来源 |
+| 3 | **三元组事实反查** | LLM 输出的 (方法/数据集/指标) 在 Neo4j 中反向验证，硬冲突升级为高风险 |
+| 4 | 自一致性 | 内部逻辑矛盾检测 |
+| 5 | 置信度评分 | 加权聚合，低于 0.6 标记 |
+| 6 | 高风险熔断 | 医疗断言/绝对化表述正则拦截 |
+
+> 沙箱安全：Docker `--network none` + `--read-only` + tmpfs + 512MB/1CPU/30s。**Docker daemon 不可用时后端拒绝执行任何 AI 生成代码**（`SandboxUnavailableError`），绝不静默回退到宿主进程执行；仅 pytest 或显式 `YXT_ALLOW_MOCK_SANDBOX=1` 才允许 in-process 模式。
 
 ## 📊 可观测性
 
@@ -106,51 +112,31 @@ pytest tests/ -v -o "addopts="
 
 # RAGAS 评估
 python -m tests.evaluation.ragas_eval
-
-# 消融实验
-python -m tests.evaluation.ablation
-
-# 演示脚本
-python -m tests.evaluation.demo_scenarios
 ```
 
-## 🏆 竞赛创新亮点
+## 🏆 真壁垒（与通用大模型的差异点）
 
-### 工程创新 (6项)
-1. GraphRAG 双引擎 (向量 + 知识图谱) — 每个结论可追溯到原文
-2. 六道幻觉防线 — 系统性对抗 LLM 幻觉
-3. Docker 安全沙箱 + 自动 Debug 闭环
-4. 五层 Token 成本优化 — 模型路由/语义缓存/Prompt压缩/批处理/预算管控
-5. 全链路可观测 — OpenTelemetry 追踪每个 Agent 调用
-6. 分层评估 + CI 门禁 — RAGAS 自动化回归测试
-
-### 产品创新 (3项)
-7. 从被动问答到主动规划 — 指出文献矛盾、提出研究假设
-8. 全周期闭环 — "找→读→算→写→审" 五环节打通
-9. 科研经验可复用 — 课题组知识图谱持续积累
-
-### 工程创新 (3项)
-10. 熔断器 + 优雅降级 — 单点故障下仍可降级运行
-11. 数据飞轮 — 用户纠错→微调样本→LoRA更新
-12. Docker 安全沙箱 — 自托管方案，网络隔离+资源限制
+1. **三元组事实反查**：每条 (方法, 数据集, 指标) 断言在知识图谱中反向验证，不一致即标红——纯 RAG 做不到。
+2. **Data Analyst 九段流水线**：数据画像 → RAG 召回绘图模板/统计规范 → 任务规划 → coder 生成代码 → Docker 沙箱执行 → 自动 Debug（≤3 轮）→ 两级结果校验 → 解释报告 → Notebook+环境锁打包。
+3. **实验设计证据回溯**：Optuna 多目标优化，每条推荐方案必须引用 KG 中具体论文节点，无引用不出建议；实测结果回流形成先验闭环。
+4. **领域包分区**：图谱/向量/先验按"领域包"隔离，跨包命中显式声明并降权，避免不同课题互相污染。
 
 ## 📁 项目结构
 
 ```
 yanxitong/
 ├── src/
-│   ├── agents/          # 7个 Agent (supervisor/retriever/kg_builder/data_analyst/experiment_designer/writing_assistant/academic_reviewer)
-│   ├── knowledge/       # GraphRAG 双引擎 (vector_store/graph_store/graphrag)
-│   ├── tools/           # 工具层 (arxiv/semantic_scholar/pdf_parser/sandbox/citation_formatter)
-│   ├── safety/          # 安全层 (hallucination/guard/citation)
-│   ├── workflows/       # LangGraph 工作流 (state/supervisor_graph/subagent_graphs)
-│   ├── api/             # FastAPI 接口 (routes/schemas/middleware)
-│   ├── observability/   # 可观测性 (tracing/metrics)
+│   ├── agents/          # 7 个 Agent (supervisor/retriever/kg_builder/data_analyst/
+│   │                    #   experiment_designer/writing_assistant/academic_reviewer)
+│   ├── knowledge/       # GraphRAG 双引擎 (vector_store/graph_store/graphrag/kb)
+│   ├── tools/           # 工具层 (arxiv/semantic_scholar/openalex/pdf_parser/sandbox)
+│   ├── safety/          # 安全层 (hallucination/citation/triple_check/guard)
+│   ├── workflows/       # LangGraph 工作流 (state/supervisor_graph)
+│   ├── api/             # FastAPI 接口 (routes/schemas/auth/middleware)
+│   ├── observability/   # 可观测性 (tracing/metrics/audit_store)
 │   └── main.py          # 应用入口
-├── tests/
-│   ├── unit/            # 单元测试
-│   ├── integration/     # 集成测试 (Phase 1-6)
-│   └── evaluation/      # 评估脚本 (RAGAS/消融/演示)
+├── tests/               # 单元 / 集成 / 评估
+├── docs/                # 方案文档与 NEXT_PLAN
 ├── docker/              # Docker 配置
 ├── docker-compose.yml   # 一键部署
 ├── config.yaml          # 全局配置

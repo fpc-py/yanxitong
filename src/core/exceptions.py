@@ -1,4 +1,4 @@
-"""Shared exception hierarchy for v2.0."""
+"""Shared exception hierarchy for v3.0."""
 
 
 class YanxitongError(Exception):
@@ -68,6 +68,23 @@ class SandboxTimeoutError(SandboxError):
     def __init__(self, message: str = "", timeout_seconds: int = 30, **kwargs):
         super().__init__(message, retryable=True, **kwargs)
         self.timeout_seconds = timeout_seconds
+
+
+class SandboxUnavailableError(SandboxError):
+    """No code sandbox available: Docker daemon unreachable and in-process
+    fallback (which would run LLM-generated code on the host) is not
+    explicitly permitted by the environment.
+
+    This is a deliberate production guard: silently degrading to an
+    in-process sandbox would execute AI-generated code on the host machine,
+    which is a remote-code-execution risk. Callers must surface this as a
+    503 / failed-agent-result instead of pretending the run succeeded.
+    """
+    def __init__(self, message: str = "", **kwargs):
+        # 绕过 SandboxError.__init__ 里写死的 retryable=True（它会把 retryable
+        # 再塞进 kwargs，导致与本处的 retryable=True 冲突）。
+        kwargs.pop("retryable", None)
+        YanxitongError.__init__(self, message, retryable=True, **kwargs)
 
 
 class LLMError(YanxitongError):

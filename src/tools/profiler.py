@@ -207,7 +207,11 @@ async def profile_data_file(path: str, sandbox=None) -> dict:
     if not path or not os.path.exists(path):
         return {**degraded, "error": "数据文件不存在"}
 
-    sandbox = sandbox or get_sandbox()
+    try:
+        sandbox = sandbox or get_sandbox()
+    except Exception as exc:  # SandboxUnavailableError：画像降级，不阻塞主流程
+        logger.warning("Sandbox unavailable for profiling: %s", exc)
+        return {**degraded, "error": f"沙箱不可用：{exc}"}
     mount_name = _sanitize_mount_name(filename)
     script = _build_script(f"/workspace/{mount_name}", filename)
     try:

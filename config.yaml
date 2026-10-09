@@ -1,5 +1,5 @@
 # =============================================================================
-# 研析通 (YanXiTong) v2.0 — central runtime configuration
+# 研析通 (YanXiTong) v3.0 — central runtime configuration
 #
 # 生效优先级（低 → 高）：代码默认值 < 本文件 < .env < 真实环境变量。
 # 注意：键名必须与 src/core/config.py 中对应 Config 类的字段完全一致才会生效
@@ -10,7 +10,7 @@
 
 app:
   name: yanxitong                # 文档用途（无对应字段）
-  version: "2.0.0"               # 文档用途（无对应字段）
+  version: "3.0.0"               # 文档用途（无对应字段）
   env: dev                       # 文档用途（无对应字段）
   host: 0.0.0.0
   port: 8001
