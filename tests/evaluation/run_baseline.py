@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import argparse, asyncio, json, logging, os, sys, time
 from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -75,10 +77,11 @@ def has_citation(answer: str) -> bool:
     return bool(re.search(r"\[\d+\]", answer or ""))
 
 
-async def run_one(supervisor, sample: dict, no_kg: bool, no_triple: bool) -> dict:
+async def run_one(supervisor, retriever, sample: dict, no_kg: bool, no_triple: bool) -> dict:
     sid = f"eval-{sample['id']}-{int(time.time())}"
     state = {
         "user_query": sample["query"],
+        "research_topic": sample["query"],
         "session_id": sid,
         "user_id": "eval-user",
         "intent": None,
@@ -87,11 +90,14 @@ async def run_one(supervisor, sample: dict, no_kg: bool, no_triple: bool) -> dic
         "literature_results": [],
         "cross_kb_ids": [],
     }
-    # 消融开关：通过环境变量传给子系统（graphrag 的 KG 融合在连接失败时已自动降级）
     os.environ["YXT_NO_KG"] = "1" if no_kg else "0"
     os.environ["YXT_NO_TRIPLE"] = "1" if no_triple else "0"
 
     t0 = time.perf_counter()
+    # 先跑 retriever：它会查本地索引（建索引阶段已把论文入 FAISS），不重复抓网
+    # （本地有命中就返回，没命中才走外部 API——评测期间主要走本地索引）
+    r_res = await retriever.execute(state)
+    state["literature_results"] = (r_res.data or {}).get("papers", [])
     result = await supervisor.execute(state)
     latency = time.perf_counter() - t0
 
@@ -128,13 +134,15 @@ async def main():
         samples = samples[: args.limit]
 
     from src.agents.supervisor.agent import SupervisorAgent
+    from src.agents.retriever.agent import RetrieverAgent
     supervisor = SupervisorAgent()
+    retriever = RetrieverAgent()
 
     rows = []
     for i, s in enumerate(samples, 1):
         logger.warning("[%d/%d] %s: %s", i, len(samples), s["id"], s["query"][:40])
         try:
-            row = await run_one(supervisor, s, args.no_kg, args.no_triple)
+            row = await run_one(supervisor, retriever, s, args.no_kg, args.no_triple)
         except Exception as e:
             row = {"id": s["id"], "query": s["query"], "success": False, "error": str(e), "answer": ""}
         rows.append(row)
