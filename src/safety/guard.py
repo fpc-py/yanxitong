@@ -36,6 +36,11 @@ class InputGuard:
         (r"(?i)\b(kill|murder|attack|bomb|terrorist|violence)\b.*\b(how\s+to|instructions?|guide)\b", "violence"),
         (r"(?i)\b(suicide|self-harm|self\s+harm|kill\s+myself)\b", "self_harm"),
         (r"(?i)\b(hack|crack|exploit|malware|ransomware|phishing)\b.*\b(how\s+to|create|write|build)\b", "cyber_attack"),
+        # 中文：危险操作 / 违法请求（学术助手不该答的边界）
+        (r"(开锁|撬锁|破解.{0,4}(锁|密码)|智能门锁.{0,6}(控制|开锁|破解))", "unauthorized_access"),
+        (r"(止痛药|毒品|违禁药|麻醉剂|配方|合成).{0,10}(剂量|怎么配|怎么制|合成方法)", "drug_abuse"),
+        (r"(炸弹|爆炸物|枪支|武器|制造).{0,10}(怎么|方法|配方|教程)", "weapon_making"),
+        (r"(黑进|入侵|攻击|渗透).{0,6}(服务器|系统|网站|他人)", "cyber_attack_cn"),
     ]
 
     @classmethod

@@ -5,6 +5,7 @@ from src.agents.base import BaseAgent, AgentResult
 from src.knowledge.graphrag import get_graphrag
 from src.safety.hallucination import get_hallucination_defense
 from src.safety.citation import get_citation_tracker
+from src.safety.guard import get_input_guard
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,26 @@ class SupervisorAgent(BaseAgent):
             "confidence": state.get("intent_confidence", 0.0),
         }
         self._audit("intent", intent)
+
+        # ---- 输入安全门禁：危险/越界请求直接拒答，不进 RAG ----
+        # 有索引后即使是危险问题也可能召回"相关"论文，不能靠 papers 是否为空判拒答。
+        guard = get_input_guard().check(query)
+        if not guard.passed and guard.risk_level in ("critical", "high"):
+            self._audit("blocked_by_guard", {"reason": guard.blocked_reason, "cats": guard.categories_triggered})
+            return AgentResult(
+                success=True,
+                data={
+                    "intent": "blocked",
+                    "action": "refuse",
+                    "query": query,
+                    "answer": (
+                        "这个问题超出了本系统的服务范围。本系统是学术文献助手，"
+                        "不提供危险操作、非法行为或有害内容的指导。"
+                        "如果你有文献调研、论文解读、科研方法相关的问题，欢迎继续提问。"
+                    ),
+                },
+                confidence=0.95,
+            )
 
         papers = state.get("literature_results", [])
 
