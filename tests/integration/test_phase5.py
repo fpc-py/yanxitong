@@ -53,7 +53,7 @@ class TestTracing:
 class TestRAGASEvaluator:
     def test_evaluator_imports(self):
         from tests.evaluation.ragas_eval import RAGASEvaluator, GOLDEN_SET
-        assert len(GOLDEN_SET) == 10
+        assert len(GOLDEN_SET) >= 10  # goldset.json 金标集（A4 扩展到 30 条）
 
     def test_faithfulness_perfect(self):
         from tests.evaluation.ragas_eval import RAGASEvaluator
@@ -90,7 +90,7 @@ class TestRAGASEvaluator:
         from tests.evaluation.ragas_eval import RAGASEvaluator
         e = RAGASEvaluator()
         report = e.run_evaluation()
-        assert report["total_samples"] == 10
+        assert report["total_samples"] >= 10  # goldset.json 扩展到 30 条
         assert "ci_pass" in report
 
 

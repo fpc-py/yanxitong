@@ -136,6 +136,12 @@ class RetrieverConfig(_EnvFirstConfig):
     openalex_api_key: str = ""
     """Optional OpenAlex API key (free registration); empty string uses the anonymous tier."""
 
+    reranker_model: str = ""
+    """Path to a cross-encoder reranker (e.g. BAAI/bge-reranker-v2-m3). Empty disables."""
+
+    reranker_candidates: int = 20
+    """How many dense candidates to feed the reranker."""
+
 
 class MCPConfig(_EnvFirstConfig):
     """Transport and timeout policy for the paper-source MCP layer."""

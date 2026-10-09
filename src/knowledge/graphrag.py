@@ -28,6 +28,7 @@ from typing import Optional
 
 from src.knowledge.kb import query_chunks as kb_query_chunks, team_scope
 from src.knowledge.vector_store import get_vector_store
+from src.knowledge.reranker import rerank as _rerank
 from src.knowledge.graph_store import CROSS_KB_WEIGHT, get_graph_store
 from src.core.config import get_settings
 from src.tools.paper_schema import make_paper_id
@@ -247,17 +248,18 @@ class GraphRAG:
         # Step 1: Vector search —— 论文索引按领域包分区（scope=kb_id，跨会话沉淀）
         if primary:
             scopes = [primary] + [x for x in cross if x != primary]
-            paper_results = []
-            for doc in vs.search(question, top_k=k * 2, scopes=scopes):
+            recall_n = max(k * 2, get_settings().retriever.reranker_candidates)
+            candidates = []
+            for doc in vs.search(question, top_k=recall_n, scopes=scopes):
                 doc = dict(doc)
                 doc_kb = str(doc.get("kb_id") or doc.get("scope") or primary)
                 doc["kb_id"] = doc_kb
                 doc["cross_kb"] = doc_kb != primary
                 doc["weight"] = CROSS_KB_WEIGHT if doc["cross_kb"] else 1.0
                 doc["score"] = float(doc.get("similarity") or 0.0) * doc["weight"]
-                paper_results.append(doc)
-            paper_results.sort(key=lambda d: -d["score"])
-            paper_results = paper_results[:k]
+                candidates.append(doc)
+            # B1: cross-encoder rerank on the dense shortlist; degrades to dense order
+            paper_results = _rerank(question, candidates, top_k=k)
         else:
             paper_results = vs.search(question, top_k=k, scope=scope)
 

@@ -54,7 +54,9 @@ retriever:
   embedding_model: d:/aafpc/yanxitong/models/models/BAAI--bge-m3/snapshots/master
   vector_dim: 1024
   top_k: 8                       # GraphRAG 融合检索返回条数
-  index_path: data/faiss         # 论文 FAISS 索引目录（index.faiss + docs.json）
+  index_path: data/faiss
+  reranker_model:   # 留空=禁用精排；填 bge-reranker-v2-m3 本地路径即启用（B1 已留接口）
+  reranker_candidates: 20         # 论文 FAISS 索引目录（index.faiss + docs.json）
   index_max_papers: 20           # 每轮问答最多编码入库的论文数（CPU 上 BGE 编码是链路最慢段）
   arxiv_max_results: 20
   semantic_scholar_max_results: 20
