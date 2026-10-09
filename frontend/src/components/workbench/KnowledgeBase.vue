@@ -1,16 +1,18 @@
 <script setup lang="ts">
 // 知识库：双区上传（课题组共享 team / 我的私有 personal）+ 解析报告 + 文档列表（归属徽章 · 块数·字数 / 删除）
 // team 需登录且仅上传者可删；personal 仅本人可见。上传与删除失败用 ElMessage 提示；列表加载失败静默降级
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { extractErrorMessage } from '@/api/client'
 import { getAnonId } from '@/api/identity'
 import { useAuthStore } from '@/stores/auth'
+import { useSessionStore } from '@/stores/session'
 import { useSystemStore } from '@/stores/system'
 import type { KnowledgeFileItem, KnowledgeUploadResult } from '@/api/types'
 
 const store = useSystemStore()
 const auth = useAuthStore()
+const sessionStore = useSessionStore()
 
 const ACCEPT = '.txt,.md,.pdf'
 const inputRef = ref<HTMLInputElement | null>(null)
@@ -18,7 +20,14 @@ const dragging = ref(false)
 const uploading = ref(false)
 const deletingKey = ref<string | null>(null)
 const library = ref<'team' | 'personal'>('personal')
+// 领域标签：'' = 通用（所有领域包均可召回）；实包 id = 仅该包召回
+const kbTag = ref('')
 const lastReport = ref<KnowledgeUploadResult | null>(null)
+
+onMounted(() => void sessionStore.loadPacks())
+
+/** 可打标签的领域包（默认包吸收所有未打标签内容，不需要显式选择） */
+const tagOptions = computed(() => sessionStore.packs.filter((p) => p.kb_id !== 'default'))
 
 /** 当前身份标签（与后端 owner 对齐：user:<id> / anon:<anon_id>），用于判断删除权限 */
 const myLabel = computed(() => (auth.isLoggedIn && auth.user ? `user:${auth.user.id}` : `anon:${getAnonId()}`))
@@ -75,7 +84,7 @@ async function doUpload(file: File): Promise<void> {
   uploading.value = true
   lastReport.value = null
   try {
-    const res = await store.uploadKnowledge(file, library.value)
+    const res = await store.uploadKnowledge(file, library.value, kbTag.value)
     lastReport.value = res
     if (res.deduped) {
       ElMessage.info(`「${res.filename}」内容与库中已有文档一致，已跳过重复入库`)
@@ -147,6 +156,15 @@ function uploaderText(uploader: string): string {
         <span v-if="!auth.isLoggedIn" class="kb-lib-hint">登录后可上传到课题组共享库</span>
         <span v-else-if="library === 'team'" class="kb-lib-hint">共享库对所有成员可检索</span>
         <span v-else class="kb-lib-hint">私有库仅本人可见与检索</span>
+      </div>
+
+      <div class="kb-lib-row">
+        <span class="kb-lib-hint">领域标签</span>
+        <el-select v-model="kbTag" size="small" class="kb-tag-select" :disabled="uploading" placeholder="通用（所有领域包可见）">
+          <el-option label="通用（所有领域包可见）" value="" />
+          <el-option v-for="p in tagOptions" :key="p.kb_id" :label="`仅 ${p.name}`" :value="p.kb_id" />
+        </el-select>
+        <span class="kb-lib-hint">打标签后仅在对应领域包的问答中被召回</span>
       </div>
 
       <div
@@ -256,6 +274,10 @@ function uploaderText(uploader: string): string {
 .kb-lib-hint {
   font-size: 11px;
   color: var(--text-3);
+}
+
+.kb-tag-select {
+  width: 210px;
 }
 
 .kb-report {

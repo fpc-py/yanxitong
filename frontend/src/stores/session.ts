@@ -4,7 +4,7 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import api, { REQUEST_TIMEOUT, claimConfidence, claimText, extractErrorMessage, flattenCitations, isNotFound, isQuotaExceeded } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
-import type { Citation, Claim, ConflictItem, GapItem, HealthResponse, MatrixRow, SessionListItem, SessionStatus } from '@/api/types'
+import type { Citation, Claim, ConflictItem, DomainPack, GapItem, HealthResponse, MatrixRow, SessionListItem, SessionStatus } from '@/api/types'
 
 /** 一条问答记录 */
 export interface ChatMessage {
@@ -77,6 +77,65 @@ export const useSessionStore = defineStore('session', () => {
   // ---- 会话标识 ----
   const sessionId = ref<string | null>(readStoredSession())
   const topic = ref<string>('')
+
+  // ---- 领域包（KnowledgeBase 分区） ----
+  const packs = ref<DomainPack[]>([])
+  // 新建会话将绑定的领域包（持久化：同领域深耕时连续新建会话不必重复选择）
+  const KB_KEY = 'yanxitong.kb_id'
+  const pendingKbId = ref<string>(readStoredKb())
+
+  function readStoredKb(): string {
+    try {
+      return localStorage.getItem(KB_KEY) || 'default'
+    } catch {
+      return 'default'
+    }
+  }
+
+  /** 选择下一个新会话的领域包（换包=新会话；已有会话不受影响） */
+  function setPendingKbId(kbId: string): void {
+    pendingKbId.value = kbId || 'default'
+    try {
+      localStorage.setItem(KB_KEY, pendingKbId.value)
+    } catch {
+      /* 静默 */
+    }
+  }
+
+  /** 拉取当前身份可见的领域包（含隐式默认包）；失败静默保留旧列表 */
+  async function loadPacks(): Promise<void> {
+    try {
+      packs.value = await api.listPacks()
+    } catch {
+      /* 静默降级：选择器回落到「未分类（默认）」 */
+    }
+  }
+
+  /** 新建领域包并立即选中（供创建表单使用） */
+  async function createPack(name: string, description = ''): Promise<DomainPack | null> {
+    try {
+      const pack = await api.createPack(name, description)
+      await loadPacks()
+      setPendingKbId(pack.kb_id)
+      return pack
+    } catch (e) {
+      error.value = extractErrorMessage(e)
+      return null
+    }
+  }
+
+  /** 更新当前会话的跨域参考声明（读侧过滤，立即影响后续提问） */
+  async function setCrossKb(crossIds: string[]): Promise<boolean> {
+    if (!sessionId.value) return false
+    try {
+      const res = await api.patchSessionKb(sessionId.value, crossIds)
+      if (status.value) status.value = { ...status.value, cross_kb_ids: res.cross_kb_ids ?? [] }
+      return true
+    } catch (e) {
+      error.value = extractErrorMessage(e)
+      return false
+    }
+  }
 
   /** 写入会话 id 并同步持久化 */
   function setSessionId(id: string | null): void {
@@ -184,6 +243,8 @@ export const useSessionStore = defineStore('session', () => {
     try {
       status.value = await api.getSessionStatus(sessionId.value)
       if (status.value.topic) topic.value = status.value.topic
+      // 让「新建会话」默认沿用当前会话的领域包（同领域跨会话沉淀）
+      if (status.value.kb_id) setPendingKbId(status.value.kb_id)
     } catch (e) {
       if (isNotFound(e)) {
         // 会话在后端已失效（后端重启或过期）→ 清空本地会话与历史，避免各页面反复报错
@@ -271,7 +332,11 @@ export const useSessionStore = defineStore('session', () => {
           // 这里刻意不清空 sessionId，否则视图会瞬间切回「建立会话」表单。
         }
       }
-      return api.createSession({ query, topic: topicInput || topic.value || 'general' })
+      return api.createSession({
+        query,
+        topic: topicInput || topic.value || 'general',
+        kb_id: pendingKbId.value,
+      })
     })
     const ms = Date.now() - t0
 
@@ -402,6 +467,10 @@ export const useSessionStore = defineStore('session', () => {
   const phase = computed(() => status.value?.current_phase ?? '')
   const humanReviewRequired = computed(() => status.value?.human_review_required ?? false)
   const papersCount = computed(() => status.value?.papers_count ?? 0)
+  /** 当前会话绑定的领域包（旧会话/未取到状态时回落默认包） */
+  const activeKbId = computed(() => status.value?.kb_id ?? 'default')
+  const activeKbName = computed(() => status.value?.kb_name || '未分类（默认）')
+  const crossKbIds = computed<string[]>(() => status.value?.cross_kb_ids ?? [])
 
   /**
    * 从一条 claim 中提取可解析的引用来源。
@@ -438,6 +507,8 @@ export const useSessionStore = defineStore('session', () => {
     // state
     sessionId,
     topic,
+    packs,
+    pendingKbId,
     health,
     healthError,
     status,
@@ -462,6 +533,9 @@ export const useSessionStore = defineStore('session', () => {
     phase,
     humanReviewRequired,
     papersCount,
+    activeKbId,
+    activeKbName,
+    crossKbIds,
     allCitations,
     normalizedClaims,
     // actions
@@ -479,5 +553,9 @@ export const useSessionStore = defineStore('session', () => {
     removeSession,
     runTask,
     pushMessage,
+    loadPacks,
+    createPack,
+    setPendingKbId,
+    setCrossKb,
   }
 })

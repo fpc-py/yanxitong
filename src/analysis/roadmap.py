@@ -118,13 +118,16 @@ class RoadmapBuilder:
     async def _store(self):
         return self._gs if self._gs is not None else await get_graph_store()
 
-    async def build(self, scope: Optional[str] = None) -> dict:
+    async def build(self, scope: Optional[str] = None, kb_id: Optional[str] = None) -> dict:
+        """构建路线图；``kb_id`` 给定时按领域包过滤（时间线/演进链/矛盾/空白同包）。"""
         try:
             gs = await self._store()
-            timeline_rows = await gs.timeline()
-            evolution_edges = await gs.evolution_edges()
-            contradictions = await gs.contradictions()
-            gaps = await gs.find_sparse_entities(scope=scope or None, limit=20)
+            kb = (kb_id or "").strip()
+            kwargs = {"kb_id": kb} if kb else {}
+            timeline_rows = await gs.timeline(**kwargs)
+            evolution_edges = await gs.evolution_edges(**kwargs)
+            contradictions = await gs.contradictions(**kwargs)
+            gaps = await gs.find_sparse_entities(scope=scope or None, limit=20, **kwargs)
         except Exception as exc:
             logger.warning("Roadmap degraded: %s", exc)
             return _empty(degraded=True)
@@ -139,5 +142,5 @@ class RoadmapBuilder:
         }
 
 
-async def get_roadmap(scope: Optional[str] = None) -> dict:
-    return await RoadmapBuilder().build(scope=scope)
+async def get_roadmap(scope: Optional[str] = None, kb_id: Optional[str] = None) -> dict:
+    return await RoadmapBuilder().build(scope=scope, kb_id=kb_id)

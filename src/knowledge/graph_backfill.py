@@ -52,13 +52,19 @@ async def backfill(session_loader=None) -> dict:
         papers = (state or {}).get("literature_results") or []
         if not papers:
             continue
-        graph = build_deterministic_graph([normalize_paper(p) for p in papers])
+        kb_id = str((state or {}).get("kb_id") or "default")
+        graph = build_deterministic_graph([normalize_paper(p) for p in papers], kb_id=kb_id)
         if not graph["papers"]:
             continue
         try:
-            await gs.upsert_papers(graph["papers"])
-            await gs.upsert_entities(graph["entities"], session_id=session_id)
-            await gs.upsert_edges(graph["edges"], session_id=session_id)
+            if kb_id != "default":
+                await gs.upsert_papers(graph["papers"], kb_id=kb_id)
+                await gs.upsert_entities(graph["entities"], session_id=session_id, kb_id=kb_id)
+                await gs.upsert_edges(graph["edges"], session_id=session_id, kb_id=kb_id)
+            else:  # 默认包走遗留调用形态（id 与属性语义相同）
+                await gs.upsert_papers(graph["papers"])
+                await gs.upsert_entities(graph["entities"], session_id=session_id)
+                await gs.upsert_edges(graph["edges"], session_id=session_id)
             paper_ids = [p["paper_id"] for p in graph["papers"]]
             await gs.link_session(session_id, paper_ids)
         except Exception as exc:

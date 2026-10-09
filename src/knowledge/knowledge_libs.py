@@ -186,8 +186,12 @@ def recall(
     profile: dict | None = None,
     top_k: int | None = None,
     libraries: list[str] | None = None,
+    kb_id: str = "",
 ) -> dict:
     """召回内置知识库的相关块（``libraries=None`` 时用数据分析默认 4 库）。
+
+    ``kb_id`` 透传给 ``kb.query_chunks`` 的领域包过滤；内置库块不打标签，
+    任何包下均可见（调用方无需关心）。
 
     Returns:
         ``{query, libraries: {lib: {label, chunks: [{section, text, source,
@@ -203,7 +207,7 @@ def recall(
         ensure_seeded()
         hits = 0
         for library in libs:
-            for hit in kb.query_chunks(query, scopes=[lib_scope(library)], top_k=k):
+            for hit in kb.query_chunks(query, scopes=[lib_scope(library)], top_k=k, kb_id=kb_id):
                 out[library]["chunks"].append(
                     _format_chunk(library, hit, hit.get("similarity", 0.0))
                 )

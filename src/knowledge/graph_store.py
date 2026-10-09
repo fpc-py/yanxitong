@@ -3,15 +3,18 @@
 Identity model (single source of truth, see ``src.tools.paper_schema``):
 
 * Paper nodes are keyed by ``paper_id`` = ``ax:{arxiv}`` | ``th:{title_hash}``
-  | ``url:{sha1}`` — the same paper always maps to the same node.
+  | ``url:{sha1}`` — the same paper always maps to the same node. With a
+  domain pack (``kb_id``) the id embeds the pack: ``ax:{kb}:{arxiv}``.
 * Entity nodes are keyed by ``entity_id`` = ``e:{sha1(normalized name)[:12]}``
-  and carry both the generic ``:Entity`` label and their schema type label.
+  (``e:{kb}:{sha1}`` inside a pack) and carry both the generic ``:Entity``
+  label and their schema type label.
 * Every relationship carries ``edge_key = sha1(source|type|target)[:16]`` so
   MERGE is idempotent and the human-review sampling stays deterministic.
 
-Papers and entities accumulate globally (team knowledge base); per-session
-views are preserved through ``(:Session)-[:RETRIEVED]->(:Paper)`` and the
-``sessions`` list property on each edge.
+领域包分区（KnowledgeBase 隔离）：本体（schema）全局共享，实例按 ``kb_id``
+属性过滤；空/``"default"`` 保持遗留 id 形态，升级零迁移（``kb_id`` 为 NULL
+的旧节点视同默认包）。读侧 ``kb_id=None``=旧全局行为（兼容），``kb_id`` 有值
+即收窄且不再有隐式全局 pass。
 """
 
 from __future__ import annotations
@@ -34,6 +37,9 @@ _PAPER_ID_PREFIXES = ("ax:", "th:", "url:")
 _ENTITY_NOISE = re.compile(r"[^a-z0-9\u4e00-\u9fff]+")
 _IDENTITY_PROPS = ("paper_id", "entity_id")
 
+#: 显式声明跨域时的重排权重（主包 1.0，跨包结果打折后排序）
+CROSS_KB_WEIGHT = 0.85
+
 _CONSTRAINTS = (
     "CREATE CONSTRAINT paper_id_unique IF NOT EXISTS FOR (p:Paper) REQUIRE p.paper_id IS UNIQUE",
     "CREATE CONSTRAINT entity_id_unique IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_id IS UNIQUE",
@@ -55,10 +61,34 @@ def normalize_entity_name(name: str) -> str:
     return _ENTITY_NOISE.sub(" ", str(name or "").lower()).strip()
 
 
-def make_entity_id(name: str) -> str:
-    """Deterministic entity id: same name always resolves to the same node."""
+def make_entity_id(name: str, kb_id: str = "") -> str:
+    """Deterministic entity id: same (kb, name) always resolves to the same node.
+
+    领域包分区：空/``"default"`` 保持遗留形态 ``e:{sha1}``（与升级前数据天然
+    合并）；实包形如 ``e:{kb}:{sha1}``，同名实体在不同领域包内分立（实例隔离）。
+    """
     norm = normalize_entity_name(name)
-    return "e:" + hashlib.sha1(norm.encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha1(norm.encode("utf-8")).hexdigest()[:12]
+    kb = (kb_id or "").strip()
+    if not kb or kb == "default":
+        return "e:" + digest
+    return f"e:{kb}:{digest}"
+
+
+def kb_filter(alias: str = "n") -> str:
+    """领域包过滤谓词：``$kb`` 为 None 不过滤；``"default"`` 含未迁移(Null)数据。"""
+    return (
+        f"($kb IS NULL OR {alias}.kb_id = $kb "
+        f"OR ({alias}.kb_id IS NULL AND $kb = 'default'))"
+    )
+
+
+def kb_filter_multi(alias: str = "n", param: str = "kbs") -> str:
+    """多包过滤谓词（主包 + 显式跨域包）；``$kbs`` 为 None 不过滤。"""
+    return (
+        f"(${param} IS NULL OR {alias}.kb_id IN ${param} "
+        f"OR ({alias}.kb_id IS NULL AND 'default' IN ${param}))"
+    )
 
 
 def make_edge_key(source_id: str, rel_type: str, target_id: str) -> str:
@@ -128,17 +158,19 @@ class GraphStore:
 
     # ------------------------------------------------------------------ writes
 
-    async def upsert_papers(self, papers: list[dict]) -> dict:
+    async def upsert_papers(self, papers: list[dict], kb_id: str = "") -> dict:
         """Batch-merge Paper nodes by deterministic ``paper_id``.
 
         Each row: {paper_id, title, year, authors, venue, arxiv_id, doi, url,
         title_hash, abstract, source, citations_count}. Rows without a
         paper_id are skipped. When an ``ax:`` record arrives for a title that
         already exists as a ``th:`` node, the duplicate is collapsed (edges
-        rewired, session links moved, duplicate deleted).
+        rewired, session links moved, duplicate deleted) — 仅在同一个领域包
+        内收敛，不跨包合并。``kb_id`` 写入节点属性（空 = 默认包）。
         """
         rows = []
         ts = time.time()
+        kb = (kb_id or "").strip() or "default"
         for p in papers:
             pid = (p.get("paper_id") or "").strip()
             if not pid:
@@ -164,28 +196,31 @@ class GraphStore:
             "UNWIND $rows AS row "
             "MERGE (p:Paper {paper_id: row.paper_id}) "
             "SET p += row "
+            "SET p.kb_id = coalesce(p.kb_id, $kb) "
             "SET p.created_at = coalesce(p.created_at, $ts), p.updated_at = $ts",
-            {"rows": rows, "ts": ts},
+            {"rows": rows, "ts": ts, "kb": kb},
         )
         collapsed = 0
         for row in rows:
             if row["paper_id"].startswith("ax:") and row["title_hash"]:
-                collapsed += await self._collapse_title_duplicate(row["paper_id"], row["title_hash"])
+                collapsed += await self._collapse_title_duplicate(row["paper_id"], row["title_hash"], kb)
         return {"papers": len(rows), "collapsed": collapsed}
 
-    async def _collapse_title_duplicate(self, canonical_id: str, th: str) -> int:
+    async def _collapse_title_duplicate(self, canonical_id: str, th: str, kb_id: str = "") -> int:
         """Merge ``th:`` duplicates of a paper that now has an ``ax:`` id.
 
         Rare path (a title-only record later gains its arXiv id): fetch the
         duplicate's edges in both directions, rewrite them onto the canonical
         node (reusing upsert_edges so edge_key dedup applies), move session
-        links, then delete the duplicate.
+        links, then delete the duplicate. 只收敛同一个领域包内的重复。
         """
+        kb = (kb_id or "").strip() or "default"
         dups = await self._run(
             "MATCH (dup:Paper {title_hash: $th}) "
             "WHERE dup.paper_id <> $pid AND dup.paper_id STARTS WITH 'th:' "
+            "AND coalesce(dup.kb_id, 'default') = $kb "
             "RETURN dup.paper_id AS dup_id",
-            {"th": th, "pid": canonical_id},
+            {"th": th, "pid": canonical_id, "kb": kb},
         )
         collapsed = 0
         for row in dups:
@@ -210,7 +245,7 @@ class GraphStore:
                 props = {k: v for k, v in (e.get("props") or {}).items() if k not in ("edge_key", "sessions", "created_at", "updated_at")}
                 rewired.append({"source_id": e["other_id"], "target_id": canonical_id, "type": e["rel"], "properties": props})
             if rewired:
-                await self.upsert_edges(rewired, session_id="")
+                await self.upsert_edges(rewired, session_id="", kb_id=kb)
             await self._run(
                 "MATCH (s:Session)-[r:RETRIEVED]->(dup:Paper {paper_id: $dup}) "
                 "MATCH (p:Paper {paper_id: $pid}) "
@@ -222,16 +257,18 @@ class GraphStore:
             logger.info("Collapsed title duplicate %s -> %s", dup_id, canonical_id)
         return collapsed
 
-    async def upsert_entities(self, entities: list[dict], session_id: str = "") -> int:
+    async def upsert_entities(self, entities: list[dict], session_id: str = "", kb_id: str = "") -> int:
         """Batch-merge Entity nodes with deterministic ids.
 
         Each row: {entity_id, name, type}. The node always carries the generic
         ``:Entity`` label plus its schema type as a secondary label; entities
-        are global, so the same name merges across sessions. MERGE keys on
-        ``:Entity`` alone — the type label is applied with ``SET`` so a node
-        re-typed by a later paper never forks into a duplicate.
+        accumulate across sessions of the same domain pack (kb_id 属性写入，
+        实例隔离靠 id 内嵌的包前缀)。MERGE keys on ``:Entity`` alone — the
+        type label is applied with ``SET`` so a node re-typed by a later paper
+        never forks into a duplicate.
         """
         ts = time.time()
+        kb = (kb_id or "").strip() or "default"
         grouped: dict[str, list[dict]] = {}
         for ent in entities:
             eid = (ent.get("entity_id") or "").strip()
@@ -254,22 +291,25 @@ class GraphStore:
                 f"MERGE (e:Entity {{entity_id: row.entity_id}}) "
                 f"SET e += row "
                 f"{label_set}"
+                f"SET e.kb_id = coalesce(e.kb_id, $kb) "
                 f"SET e.sessions = coalesce(e.sessions, []) + [x IN [$sid] WHERE x IS NOT NULL AND NOT x IN coalesce(e.sessions, [])] "
                 f"SET e.created_at = coalesce(e.created_at, $ts), e.updated_at = $ts",
-                {"rows": rows, "sid": sid, "ts": ts},
+                {"rows": rows, "sid": sid, "ts": ts, "kb": kb},
             )
             written += len(rows)
         return written
 
-    async def upsert_edges(self, edges: list[dict], session_id: str = "") -> int:
+    async def upsert_edges(self, edges: list[dict], session_id: str = "", kb_id: str = "") -> int:
         """Batch-merge relationships. Each: {source_id, target_id, type, properties}.
 
         Rows are grouped by (type, source label, target label) so one UNWIND
         round-trip covers each combination. The edge key makes the MERGE
         idempotent; ``sessions`` accumulates contributing session ids and
         ``needs_review`` is set once (a reviewed edge is never re-flagged).
+        边同样写入 ``kb_id`` 属性（空 = 默认包）供按包过滤。
         """
         ts = time.time()
+        kb = (kb_id or "").strip() or "default"
         rate = get_settings().kg.review_sample_rate
         grouped: dict[tuple[str, str, str], list[dict]] = {}
         for edge in edges:
@@ -302,10 +342,11 @@ class GraphStore:
                 f"MERGE (a)-[r:{rtype}]->(b) "
                 f"SET r += row.props "
                 f"SET r.edge_key = coalesce(r.edge_key, row.edge_key) "
+                f"SET r.kb_id = coalesce(r.kb_id, $kb) "
                 f"SET r.sessions = coalesce(r.sessions, []) + [x IN [row.session_id] WHERE x IS NOT NULL AND NOT x IN coalesce(r.sessions, [])] "
                 f"SET r.needs_review = coalesce(r.needs_review, row.needs_review) "
                 f"SET r.created_at = coalesce(r.created_at, row.ts), r.updated_at = row.ts",
-                {"rows": rows},
+                {"rows": rows, "kb": kb},
             )
             written += len(rows)
         return written
@@ -330,16 +371,20 @@ class GraphStore:
         )
         return len(ids)
 
-    async def create_entities(self, entities: list[dict]):
+    async def create_entities(self, entities: list[dict], kb_id: str = ""):
         """Legacy writer used by the KB NER path: {id, type, properties}.
 
         KB entities keep their ``kb:*|`` prefixed ids and stay outside the
-        ``:Entity`` namespace, preserving the KB isolation boundary.
+        ``:Entity`` namespace, preserving the KB isolation boundary。上传时
+        可带领域标签（``kb_id``），仅作为过滤属性附加，不改 id 前缀。
         """
+        tag = (kb_id or "").strip()
         grouped: dict[str, list[dict]] = {}
         for ent in entities:
             props = dict(ent.get("properties", {}))
             props["entity_id"] = ent["id"]
+            if tag:
+                props["kb_id"] = tag
             grouped.setdefault(_safe_label(ent.get("type", "Entity")), []).append(props)
 
         for label, rows in grouped.items():
@@ -350,14 +395,18 @@ class GraphStore:
             )
             await self._run(query, {"rows": rows})
 
-    async def create_relations(self, relations: list[dict]):
+    async def create_relations(self, relations: list[dict], kb_id: str = ""):
         """Legacy writer used by the KB NER path: {source_id, target_id, type, properties}."""
+        tag = (kb_id or "").strip()
         grouped: dict[str, list[dict]] = {}
         for rel in relations:
+            props = dict(rel.get("properties", {}))
+            if tag:
+                props["kb_id"] = tag
             grouped.setdefault(_safe_label(rel.get("type", "RELATED")), []).append({
                 "source_id": rel["source_id"],
                 "target_id": rel["target_id"],
-                "properties": dict(rel.get("properties", {})),
+                "properties": props,
             })
 
         for rtype, rows in grouped.items():
@@ -392,72 +441,117 @@ class GraphStore:
         paper["entities"] = [dict(r["e"]) for r in entity_ids_result]
         return paper
 
-    async def papers_existing(self, paper_ids: list[str]) -> list[str]:
-        """Which of these paper ids already exist in the global fact base."""
+    async def papers_existing(self, paper_ids: list[str], kb_id: Optional[str] = None) -> list[str]:
+        """Which of these paper ids already exist in the fact base（可按领域包收窄）。"""
         ids = [pid for pid in (paper_ids or []) if pid]
         if not ids:
             return []
         rows = await self._run(
-            "MATCH (p:Paper) WHERE p.paper_id IN $ids RETURN p.paper_id AS paper_id",
-            {"ids": ids},
+            f"MATCH (p:Paper) WHERE p.paper_id IN $ids AND {kb_filter('p')} "
+            "RETURN p.paper_id AS paper_id",
+            {"ids": ids, "kb": kb_id},
         )
         return [r["paper_id"] for r in rows]
 
-    async def search_entities(self, keyword: str, entity_type: Optional[str] = None) -> list[dict]:
+    async def search_entities(
+        self, keyword: str, entity_type: Optional[str] = None, kb_id: Optional[str] = None
+    ) -> list[dict]:
         type_filter = f":{_safe_label(entity_type)}" if entity_type else ""
         results = await self._run(
             f"MATCH (e:Entity{type_filter}) WHERE e.name CONTAINS $keyword "
+            f"AND {kb_filter('e')} "
             "RETURN e LIMIT 50",
-            {"keyword": keyword},
+            {"keyword": keyword, "kb": kb_id},
         )
         return [dict(r["e"]) for r in results]
 
     async def search_entities_multi(
-        self, keywords: list[str], limit: int = 200, scope: Optional[str] = None
+        self,
+        keywords: list[str],
+        limit: int = 200,
+        scope: Optional[str] = None,
+        kb_id: Optional[str] = None,
+        cross_kb_ids: Optional[list[str]] = None,
     ) -> list[dict]:
         """批量按多个关键词检索实体（一次往返）。
 
-        scope（会话 id）只把检索限定到本会话论文关联的实体；图谱本身是
-        全局累积的，未给 scope 时做全图检索（课题组复用）。
+        scope（会话 id）只把检索限定到本会话论文关联的实体；kb_id 给定后
+        再按领域包收窄（主包 + 显式声明的跨域包），跨包命中带 0.85 权重参与
+        排序（跨域显式声明并重排）。未给 kb_id 时行为与旧版一致（全图检索）。
         """
         if not keywords:
             return []
+        kbs: Optional[list[str]] = None
+        primary = (kb_id or "").strip()
+        if primary:
+            kbs = [primary]
+            for extra in (cross_kb_ids or []):
+                extra = str(extra or "").strip()
+                if extra and extra not in kbs:
+                    kbs.append(extra)
+        kb_cond = f"AND ({kb_filter_multi('e', 'kbs')}) " if kbs else ""
+        params: dict = {"keywords": keywords, "limit": limit, "kbs": kbs}
         if scope:
             results = await self._run(
                 "MATCH (s:Session {session_id: $scope})-[:RETRIEVED]->(:Paper)--(e:Entity) "
                 "WHERE any(kw IN $keywords WHERE e.name CONTAINS kw) "
-                "RETURN DISTINCT e LIMIT $limit",
-                {"keywords": keywords, "scope": scope, "limit": limit},
-            )
-        else:
-            results = await self._run(
-                "UNWIND $keywords AS kw MATCH (e:Entity) WHERE e.name CONTAINS kw "
-                "RETURN DISTINCT e LIMIT $limit",
-                {"keywords": keywords, "limit": limit},
-            )
-        return [dict(r["e"]) for r in results]
-
-    async def find_sparse_entities(self, scope: Optional[str] = None, limit: int = 30) -> list[dict]:
-        """Entities with the fewest relationships — candidate research gaps.
-
-        scope：只看本会话论文关联实体的稀疏度（会话视图内的研究空白）。
-        """
-        if scope:
-            results = await self._run(
-                "MATCH (s:Session {session_id: $scope})-[:RETRIEVED]->(:Paper)--(e:Entity) "
+                f"{kb_cond}"
                 "WITH DISTINCT e "
-                "OPTIONAL MATCH (e)-[r]-() "
-                "RETURN e AS entity, labels(e) AS labels, count(r) AS degree "
-                "ORDER BY degree ASC LIMIT $limit",
-                {"scope": scope, "limit": limit},
+                "RETURN e, size([kw IN $keywords WHERE e.name CONTAINS kw]) AS kw_hits "
+                "ORDER BY kw_hits DESC, e.name LIMIT $limit",
+                {**params, "scope": scope},
             )
         else:
             results = await self._run(
                 "MATCH (e:Entity) "
+                "WHERE any(kw IN $keywords WHERE e.name CONTAINS kw) "
+                f"{kb_cond}"
+                "RETURN e, size([kw IN $keywords WHERE e.name CONTAINS kw]) AS kw_hits "
+                "ORDER BY kw_hits DESC, e.name LIMIT $limit",
+                params,
+            )
+        entities: list[dict] = []
+        for row in results:
+            entity = dict(row["e"])
+            hits = int(row.get("kw_hits") or 1)
+            ent_kb = str(entity.get("kb_id") or "default")
+            entity["kb_id"] = ent_kb
+            entity["kw_hits"] = hits
+            weight = 1.0 if (not kbs or ent_kb == primary) else CROSS_KB_WEIGHT
+            entity["weight"] = weight
+            entity["score"] = hits * weight
+            entities.append(entity)
+        if kbs:
+            entities.sort(key=lambda e: (-e["score"], str(e.get("name") or "").lower()))
+        return entities
+
+    async def find_sparse_entities(
+        self, scope: Optional[str] = None, limit: int = 30, kb_id: Optional[str] = None
+    ) -> list[dict]:
+        """Entities with the fewest relationships — candidate research gaps.
+
+        scope：只看本会话论文关联实体的稀疏度（会话视图内的研究空白）；
+        kb_id：再按领域包收窄（默认包含未迁移数据）。
+        """
+        kb_cond = f"AND {kb_filter('e')} "
+        if scope:
+            results = await self._run(
+                "MATCH (s:Session {session_id: $scope})-[:RETRIEVED]->(:Paper)--(e:Entity) "
+                f"WHERE true {kb_cond}"
+                "WITH DISTINCT e "
                 "OPTIONAL MATCH (e)-[r]-() "
                 "RETURN e AS entity, labels(e) AS labels, count(r) AS degree "
                 "ORDER BY degree ASC LIMIT $limit",
-                {"limit": limit},
+                {"scope": scope, "limit": limit, "kb": kb_id},
+            )
+        else:
+            results = await self._run(
+                "MATCH (e:Entity) "
+                f"WHERE {kb_filter('e')} "
+                "OPTIONAL MATCH (e)-[r]-() "
+                "RETURN e AS entity, labels(e) AS labels, count(r) AS degree "
+                "ORDER BY degree ASC LIMIT $limit",
+                {"limit": limit, "kb": kb_id},
             )
         sparse = []
         for row in results:
@@ -467,6 +561,7 @@ class GraphStore:
                 "entity_id": entity.get("entity_id", ""),
                 "name": entity.get("name", ""),
                 "type": entity.get("type") or (labels[0] if labels else ""),
+                "kb_id": entity.get("kb_id") or "default",
                 "degree": row.get("degree", 0),
             })
         sparse.sort(key=lambda item: (item["degree"], item["name"]))
@@ -514,13 +609,28 @@ class GraphStore:
         types = [_safe_label(t) for t in get_settings().kg.relation_types]
         return "|".join(types) if types else "RELATED"
 
-    async def multi_hop_paths(self, entry_ids: list[str], hops: int = 2, limit: int = 120) -> dict:
-        """Expand a set of entry nodes along schema relations (both directions)."""
+    async def multi_hop_paths(
+        self,
+        entry_ids: list[str],
+        hops: int = 2,
+        limit: int = 120,
+        kb_ids: Optional[list[str]] = None,
+    ) -> dict:
+        """Expand a set of entry nodes along schema relations (both directions).
+
+        kb_ids：只允许路径经过这些领域包内的节点（主包 + 显式跨域声明）；
+        未给时与旧版一致（不限制）。防跨域穿越污染。
+        """
         ids = [i for i in (entry_ids or []) if i]
         if not ids:
             return {"nodes": [], "edges": [], "paths": []}
         hops = max(1, min(int(hops or 1), 3))
         rel_filter = self._type_filter()
+        kbs = [k for k in (kb_ids or []) if k] or None
+        kb_cond = (
+            f"AND all(n IN nodes(path) WHERE ({kb_filter_multi('n', 'kbs')})) "
+            if kbs else ""
+        )
         select = (
             "RETURN [n IN nodes(path) | coalesce(n.paper_id, n.entity_id)] AS ids, "
             "[n IN nodes(path) | coalesce(n.name, n.title, '')] AS names, "
@@ -530,16 +640,18 @@ class GraphStore:
             "[r IN relationships(path) | r.evidence_source] AS sources, "
             "[r IN relationships(path) | r.value] AS values "
         )
-        params = {"ids": ids, "limit": limit}
+        params = {"ids": ids, "limit": limit, "kbs": kbs}
         out = await self._paths(
             f"MATCH path = (start)-[:{rel_filter}*1..{hops}]->(other) "
             f"WHERE coalesce(start.paper_id, start.entity_id) IN $ids "
+            f"{kb_cond}"
             f"{select} LIMIT $limit",
             params,
         )
         incoming = await self._paths(
             f"MATCH path = (start)<-[:{rel_filter}*1..{hops}]-(other) "
             f"WHERE coalesce(start.paper_id, start.entity_id) IN $ids "
+            f"{kb_cond}"
             f"{select} LIMIT $limit",
             params,
         )
@@ -613,7 +725,7 @@ class GraphStore:
         chains.sort(key=lambda c: (-int(c.get("year") or 0), c.get("paper_title", "")))
         return chains[:limit]
 
-    async def verify_triples(self, triples: list[dict]) -> list[dict]:
+    async def verify_triples(self, triples: list[dict], kb_id: Optional[str] = None) -> list[dict]:
         """Reverse-lookup (method, dataset, metric) claims against the graph.
 
         Returns raw graph facts per triple — scoring lives in
@@ -622,6 +734,8 @@ class GraphStore:
         * which entities exist (id + name),
         * papers that link method and dataset together,
         * metric values those papers recorded (for numeric-conflict checks).
+
+        ``kb_id`` 按领域包校验（None = 旧全局行为）。
         """
         facts = []
         for triple in triples or []:
@@ -630,9 +744,9 @@ class GraphStore:
             metric = normalize_entity_name(triple.get("metric", ""))
             fact = {
                 "triple": dict(triple),
-                "method": await self._lookup_entity(method, "Method"),
-                "dataset": await self._lookup_entity(dataset, "Dataset"),
-                "metric": await self._lookup_entity(metric, "Metric"),
+                "method": await self._lookup_entity(method, "Method", kb_id),
+                "dataset": await self._lookup_entity(dataset, "Dataset", kb_id),
+                "metric": await self._lookup_entity(metric, "Metric", kb_id),
                 "supporting_papers": [],
             }
             m, d = fact["method"], fact["dataset"]
@@ -640,8 +754,9 @@ class GraphStore:
                 paper_rows = await self._run(
                     "MATCH (p:Paper)--(m:Method {entity_id: $mid}) "
                     "MATCH (p)--(d:Dataset {entity_id: $did}) "
+                    f"WHERE {kb_filter('p')} "
                     "RETURN DISTINCT p.paper_id AS paper_id, p.title AS title",
-                    {"mid": m["entity_id"], "did": d["entity_id"]},
+                    {"mid": m["entity_id"], "did": d["entity_id"], "kb": kb_id},
                 )
                 metric_id = fact["metric"].get("entity_id") if fact["metric"] else ""
                 if paper_rows and metric_id:
@@ -663,38 +778,41 @@ class GraphStore:
             facts.append(fact)
         return facts
 
-    async def _lookup_entity(self, norm_name: str, label: str) -> dict:
+    async def _lookup_entity(self, norm_name: str, label: str, kb_id: Optional[str] = None) -> dict:
         """Exact normalized-name lookup, then a CONTAINS fallback."""
         if not norm_name:
             return {}
         rows = await self._run(
             f"MATCH (e:{_safe_label(label)}) WHERE e.norm_name = $name "
+            f"AND {kb_filter('e')} "
             "RETURN e.entity_id AS entity_id, e.name AS name LIMIT 3",
-            {"name": norm_name},
+            {"name": norm_name, "kb": kb_id},
         )
         if not rows:
             rows = await self._run(
-                f"MATCH (e:{_safe_label(label)}) WHERE e.norm_name CONTAINS $name OR $name CONTAINS e.norm_name "
+                f"MATCH (e:{_safe_label(label)}) WHERE (e.norm_name CONTAINS $name OR $name CONTAINS e.norm_name) "
+                f"AND {kb_filter('e')} "
                 "RETURN e.entity_id AS entity_id, e.name AS name LIMIT 3",
-                {"name": norm_name},
+                {"name": norm_name, "kb": kb_id},
             )
         if not rows:
             return {}
         return {"entity_id": rows[0]["entity_id"], "name": rows[0]["name"], "alternatives": [r["name"] for r in rows[1:]]}
 
-    async def evidence_path(self, target_id: str, limit: int = 30) -> list[dict]:
+    async def evidence_path(self, target_id: str, limit: int = 30, kb_id: Optional[str] = None) -> list[dict]:
         """Trace a Paper/Entity node back to papers with verbatim edge evidence."""
         if not target_id:
             return []
         rows = await self._run(
             "MATCH (p:Paper)-[r]-(e:Entity) "
-            "WHERE p.paper_id = $tid OR e.entity_id = $tid "
+            "WHERE (p.paper_id = $tid OR e.entity_id = $tid) "
+            f"AND {kb_filter('p')} AND {kb_filter('e')} "
             "RETURN p.paper_id AS paper_id, p.title AS paper_title, p.arxiv_id AS arxiv_id, "
             "e.entity_id AS entity_id, e.name AS entity_name, coalesce(e.type, '') AS entity_type, "
             "type(r) AS rel, r.evidence AS evidence, r.evidence_source AS evidence_source, "
             "r.value AS value, r.sessions AS sessions "
             "ORDER BY rel LIMIT $limit",
-            {"tid": target_id, "limit": limit},
+            {"tid": target_id, "limit": limit, "kb": kb_id},
         )
         return [
             {
@@ -724,18 +842,19 @@ class GraphStore:
 
     # -------------------------------------------------------------- review ops
 
-    async def review_queue(self, limit: int = 50) -> list[dict]:
-        """Edges sampled for human review that have not been reviewed yet."""
+    async def review_queue(self, limit: int = 50, kb_id: Optional[str] = None) -> list[dict]:
+        """Edges sampled for human review that have not been reviewed yet（可按包过滤）。"""
         rows = await self._run(
             "MATCH (a)-[r]->(b) "
             "WHERE r.needs_review = true AND coalesce(r.reviewed, false) = false "
+            f"AND {kb_filter('r')} "
             "RETURN r.edge_key AS edge_key, type(r) AS rel, "
             "coalesce(a.paper_id, a.entity_id) AS source_id, coalesce(a.name, a.title, '') AS source_name, "
             "coalesce(b.paper_id, b.entity_id) AS target_id, coalesce(b.name, b.title, '') AS target_name, "
             "r.evidence AS evidence, r.evidence_source AS evidence_source, "
             "r.sessions AS sessions, coalesce(a.abstract, '') AS source_abstract, r.created_at AS created_at "
             "ORDER BY r.created_at DESC LIMIT $limit",
-            {"limit": limit},
+            {"limit": limit, "kb": kb_id},
         )
         return rows
 
@@ -845,27 +964,42 @@ class GraphStore:
 
     # -------------------------------------------------------------- analytics
 
-    async def graph_overview(self) -> dict:
-        """Counts + schema for the KG overview endpoint."""
+    async def graph_overview(self, kb_id: Optional[str] = None) -> dict:
+        """Counts + schema for the KG overview endpoint（kb_id 过滤 = 包内视图）。"""
         kg = get_settings().kg
-        papers = await self._run("MATCH (p:Paper) RETURN count(p) AS n")
-        sessions = await self._run("MATCH (s:Session) RETURN count(s) AS n")
+        papers = await self._run(
+            f"MATCH (p:Paper) WHERE {kb_filter('p')} RETURN count(p) AS n", {"kb": kb_id}
+        )
+        if kb_id:
+            sessions = await self._run(
+                "MATCH (s:Session)-[:RETRIEVED]->(p:Paper) "
+                f"WHERE {kb_filter('p')} RETURN count(DISTINCT s) AS n",
+                {"kb": kb_id},
+            )
+        else:
+            sessions = await self._run("MATCH (s:Session) RETURN count(s) AS n")
         entities = await self._run(
             "MATCH (e:Entity) "
+            f"WHERE {kb_filter('e')} "
             "RETURN coalesce(e.type, head([l IN labels(e) WHERE l <> 'Entity']), 'Entity') AS t, count(e) AS n "
             "ORDER BY n DESC",
+            {"kb": kb_id},
         )
         relations = await self._run(
             # 只统计论文事实图谱的边；知识库（kb:*| 命名空间）有独立 schema，不计入本总览
             "MATCH (a)-[r]->(b) WHERE type(r) <> 'RETRIEVED' "
+            f"AND {kb_filter('r')} "
             "AND NOT (coalesce(a.entity_id, '') STARTS WITH 'kb:' OR coalesce(a.paper_id, '') STARTS WITH 'kb:') "
             "AND NOT (coalesce(b.entity_id, '') STARTS WITH 'kb:' OR coalesce(b.paper_id, '') STARTS WITH 'kb:') "
             "RETURN type(r) AS t, count(r) AS n ORDER BY n DESC",
+            {"kb": kb_id},
         )
         pending = await self._run(
             "MATCH (a)-[r]->(b) WHERE r.needs_review = true AND coalesce(r.reviewed, false) = false "
+            f"AND {kb_filter('r')} "
             "AND NOT (coalesce(a.entity_id, '') STARTS WITH 'kb:' OR coalesce(a.paper_id, '') STARTS WITH 'kb:') "
             "RETURN count(r) AS n",
+            {"kb": kb_id},
         )
         entity_counts = {r["t"]: r["n"] for r in entities}
         relation_counts = {r["t"]: r["n"] for r in relations}
@@ -877,40 +1011,70 @@ class GraphStore:
             "relations": relation_counts,
             "relations_total": sum(relation_counts.values()),
             "pending_review": pending[0]["n"] if pending else 0,
+            "kb_id": kb_id or "default",
             "schema": {
                 "entity_types": list(kg.entity_types),
                 "relation_types": list(kg.relation_types),
             },
         }
 
-    async def timeline(self) -> list[dict]:
-        """Papers grouped by year with their methods — roadmap input."""
+    async def kb_stats(self, kb_id: str) -> dict:
+        """领域包统计（论文/实体/边），供包管理界面展示。"""
+        kb = (kb_id or "").strip() or "default"
+        papers = await self._run(
+            f"MATCH (p:Paper) WHERE {kb_filter('p')} RETURN count(p) AS n", {"kb": kb}
+        )
+        entities = await self._run(
+            f"MATCH (e:Entity) WHERE {kb_filter('e')} RETURN count(e) AS n", {"kb": kb}
+        )
+        relations = await self._run(
+            "MATCH (a)-[r]->(b) WHERE type(r) <> 'RETRIEVED' "
+            f"AND {kb_filter('r')} "
+            "AND NOT (coalesce(a.entity_id, '') STARTS WITH 'kb:' OR coalesce(a.paper_id, '') STARTS WITH 'kb:') "
+            "AND NOT (coalesce(b.entity_id, '') STARTS WITH 'kb:' OR coalesce(b.paper_id, '') STARTS WITH 'kb:') "
+            "RETURN count(r) AS n",
+            {"kb": kb},
+        )
+        return {
+            "kb_id": kb,
+            "papers": papers[0]["n"] if papers else 0,
+            "entities": entities[0]["n"] if entities else 0,
+            "relations": relations[0]["n"] if relations else 0,
+        }
+
+    async def timeline(self, kb_id: Optional[str] = None) -> list[dict]:
+        """Papers grouped by year with their methods — roadmap input（可按包过滤）。"""
         rows = await self._run(
-            "MATCH (p:Paper) WHERE coalesce(p.year, 0) > 0 "
+            f"MATCH (p:Paper) WHERE coalesce(p.year, 0) > 0 AND {kb_filter('p')} "
             "OPTIONAL MATCH (p)-[:PROPOSES]->(m:Method) "
             "RETURN p.year AS year, p.paper_id AS paper_id, p.title AS title, p.arxiv_id AS arxiv_id, "
             "collect(DISTINCT m.name) AS methods "
             "ORDER BY year ASC",
+            {"kb": kb_id},
         )
         return rows
 
-    async def evolution_edges(self) -> list[dict]:
+    async def evolution_edges(self, kb_id: Optional[str] = None) -> list[dict]:
         """Method-to-method evolution relations (EXTENDS/IMPROVES_ON/BASED_ON)."""
         rows = await self._run(
             "MATCH (a:Entity)-[r:EXTENDS|IMPROVES_ON|BASED_ON]->(b:Entity) "
+            f"WHERE {kb_filter('a')} AND {kb_filter('b')} "
             "RETURN coalesce(a.name, a.entity_id) AS source, coalesce(b.name, b.entity_id) AS target, "
             "type(r) AS rel, r.evidence AS evidence "
             "LIMIT 200",
+            {"kb": kb_id},
         )
         return rows
 
-    async def contradictions(self) -> list[dict]:
+    async def contradictions(self, kb_id: Optional[str] = None) -> list[dict]:
         rows = await self._run(
             "MATCH (a)-[r:CONTRADICTS]-(b) "
+            f"WHERE {kb_filter('a')} AND {kb_filter('b')} "
             "RETURN coalesce(a.name, a.title, a.entity_id, a.paper_id) AS source, "
             "coalesce(b.name, b.title, b.entity_id, b.paper_id) AS target, "
             "r.evidence AS evidence, r.evidence_source AS evidence_source "
             "LIMIT 100",
+            {"kb": kb_id},
         )
         # CONTRADICTS 语义对称：LLM 可能双向建边，按无序对去重避免前端 A VS B 出现两次
         seen: set[tuple] = set()

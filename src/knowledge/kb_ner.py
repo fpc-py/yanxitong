@@ -65,8 +65,11 @@ def _gate(raw: dict) -> dict:
     return {"entities": entities, "relations": relations}
 
 
-async def index_chunks(chunks: list[dict], library: str, owner: str, filename: str) -> dict:
-    """对前 ``kb.ner_max_chunks`` 个块抽实体/关系并写入 Neo4j（前缀隔离）。"""
+async def index_chunks(chunks: list[dict], library: str, owner: str, filename: str, kb_id: str = "") -> dict:
+    """对前 ``kb.ner_max_chunks`` 个块抽实体/关系并写入 Neo4j（前缀隔离）。
+
+    ``kb_id``：可选领域包标签，仅作为过滤属性写到节点/边上（id 前缀不变）。
+    """
     targets = chunks[: get_settings().kb.ner_max_chunks]
     if not targets:
         return {"entities": 0, "relations": 0}
@@ -94,9 +97,9 @@ async def index_chunks(chunks: list[dict], library: str, owner: str, filename: s
         return {"entities": 0, "relations": 0}
     try:
         gs = await get_graph_store()
-        await gs.create_entities(entities)
+        await gs.create_entities(entities, kb_id=kb_id)
         if relations:
-            await gs.create_relations(relations)
+            await gs.create_relations(relations, kb_id=kb_id)
     except Exception as exc:
         logger.warning("KB 图谱写入降级: %s", exc)
         return {"entities": 0, "relations": 0, "degraded": True}

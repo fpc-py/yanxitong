@@ -272,6 +272,8 @@ class ExperimentDesignerAgent(BaseAgent):
     async def _execute_impl(self, state: dict[str, Any]) -> AgentResult:
         intent = str(state.get("user_query") or state.get("research_topic") or "")
         session_id = str(state.get("session_id") or "")
+        kb_id = str(state.get("kb_id") or "")
+        cross_kb_ids = [str(k) for k in (state.get("cross_kb_ids") or []) if str(k or "").strip()]
         papers = state.get("literature_results") or []
         experiment_results = state.get("experiment_results") or {}
         if not isinstance(experiment_results, dict):
@@ -306,12 +308,14 @@ class ExperimentDesignerAgent(BaseAgent):
         config, config_source = await self._parse_config(intent, state.get("experiment_config"))
         stage("parse", ok=True, source=config_source, fields=sorted(k for k in config if config.get(k)))
 
-        # ② 证据检索：KG 路径 + 知识库 + 文献锚点（任一来源失败只降级）
-        evidence = await evidence_mod.collect_evidence(intent, config, session_id, papers)
+        # ② 证据检索：KG 路径 + 知识库 + 文献锚点（任一来源失败只降级；按领域包收窄）
+        evidence = await evidence_mod.collect_evidence(
+            intent, config, session_id, papers, kb_id=kb_id, cross_kb_ids=cross_kb_ids or None
+        )
         stage("retrieve", ok=not evidence.get("degraded"), degraded=bool(evidence.get("degraded")),
               anchors=len(evidence.get("anchors") or []), sources=evidence.get("sources", 0))
 
-        priors = self._load_priors(config)
+        priors = self._load_priors(config, kb_id)
 
         # ① 瓶颈诊断：五类；无证据锚点支撑的瓶颈剔除
         diagnosis = await self._diagnose(config, evidence, priors)
@@ -507,9 +511,10 @@ class ExperimentDesignerAgent(BaseAgent):
         source = "provided" if provided else ("parsed" if parsed else "none")
         return merged, source
 
-    def _load_priors(self, config: dict | None) -> dict:
+    def _load_priors(self, config: dict | None, kb_id: str = "") -> dict:
         try:
-            return prior_store.query_priors(task=str((config or {}).get("task") or ""))
+            kwargs = {"kb_id": kb_id} if kb_id else {}
+            return prior_store.query_priors(task=str((config or {}).get("task") or ""), **kwargs)
         except Exception as exc:
             self._audit("priors_degraded", {"error": str(exc)[:200]})
             return {}
@@ -707,13 +712,15 @@ async def record_feedback(
     cost: float | None = None,
     duration_hours: float | None = None,
     notes: str = "",
+    kb_id: str = "",
 ) -> dict:
     """规格⑩闭环：实验结果回流 → 先验存储（必写）+ KG（尽力）。
 
     KG 写入：Experiment 节点（``exp:{session_id}:{run_id}:{cid}``）+
     ``ACHIEVES``（Experiment→Method/Metric）与 ``USES_DATASET``（Experiment→Dataset）
     边；受 ``kg.build_enabled`` 总开关与 schema 白名单约束，Neo4j 不可用仅降级
-    （先验存储已写入，audit 记 ``kg_feedback_degraded``）。
+    （先验存储已写入，audit 记 ``kg_feedback_degraded``）。``kb_id`` 决定先验行
+    归属与 Method/Metric/Dataset 实体的包前缀（空/``default`` 走遗留命名空间）。
     """
     manifest = packaging.read_manifest(session_id, run_id)
     if not manifest:
@@ -744,7 +751,7 @@ async def record_feedback(
         session_id=session_id, run_id=run_id, candidate_id=cid, task=task,
         method=method, dataset=dataset, metric=metric, value=value,
         cost=cost, duration_hours=duration_hours, config=recommended,
-        source="feedback", notes=notes,
+        source="feedback", notes=notes, kb_id=kb_id,
     )
     result: dict = {
         "ok": record_id is not None, "record_id": record_id, "candidate_id": cid,
@@ -775,29 +782,31 @@ async def record_feedback(
     edges: list[dict] = []
     evidence_text = "；".join(f"{k}={v}" for k, v in (metrics or {}).items())[:300] or notes[:300]
     if method and "Method" in entity_types and "ACHIEVES" in relation_types:
-        entities.append({"entity_id": make_entity_id(method), "name": method, "type": "Method"})
+        entities.append({"entity_id": make_entity_id(method, kb_id), "name": method, "type": "Method"})
         edges.append({
-            "source_id": exp_id, "target_id": make_entity_id(method), "type": "ACHIEVES",
+            "source_id": exp_id, "target_id": make_entity_id(method, kb_id), "type": "ACHIEVES",
             "properties": {"evidence": evidence_text, "run_id": run_id, "value": value},
         })
     if metric and "Metric" in entity_types and "ACHIEVES" in relation_types:
-        entities.append({"entity_id": make_entity_id(metric), "name": metric, "type": "Metric"})
+        entities.append({"entity_id": make_entity_id(metric, kb_id), "name": metric, "type": "Metric"})
         edges.append({
-            "source_id": exp_id, "target_id": make_entity_id(metric), "type": "ACHIEVES",
+            "source_id": exp_id, "target_id": make_entity_id(metric, kb_id), "type": "ACHIEVES",
             "properties": {"evidence": evidence_text, "run_id": run_id, "value": value},
         })
     if dataset and "Dataset" in entity_types and "USES_DATASET" in relation_types:
-        entities.append({"entity_id": make_entity_id(dataset), "name": dataset, "type": "Dataset"})
+        entities.append({"entity_id": make_entity_id(dataset, kb_id), "name": dataset, "type": "Dataset"})
         edges.append({
-            "source_id": exp_id, "target_id": make_entity_id(dataset), "type": "USES_DATASET",
+            "source_id": exp_id, "target_id": make_entity_id(dataset, kb_id), "type": "USES_DATASET",
             "properties": {"evidence": evidence_text, "run_id": run_id},
         })
 
     try:
         store = await get_graph_store()
-        written = await store.upsert_entities(entities, session_id=session_id)
+        # 默认/遗留命名空间不传 kb kwarg（与旧调用形状一致）；实包按包写属性
+        upsert_kwargs = {"kb_id": kb_id} if kb_id and kb_id != "default" else {}
+        written = await store.upsert_entities(entities, session_id=session_id, **upsert_kwargs)
         if edges:
-            written += await store.upsert_edges(edges, session_id=session_id)
+            written += await store.upsert_edges(edges, session_id=session_id, **upsert_kwargs)
         result["kg"].update({"ok": True, "written": written})
     except Exception as exc:
         result["kg"].update({"degraded": True, "error": str(exc)[:200]})

@@ -96,30 +96,42 @@ def title_hash(title: str) -> str:
     return hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16] if norm else ""
 
 
-def make_paper_id(paper: dict) -> str:
+def _kb_prefix(kb_id: str) -> str:
+    """领域包命名空间前缀；空/默认包返回空串（保持遗留 id 形态，兼容旧数据）。"""
+    kb = (kb_id or "").strip()
+    if not kb or kb == "default":
+        return ""
+    return f"{kb}:"
+
+
+def make_paper_id(paper: dict, kb_id: str = "") -> str:
     """Deterministic graph identity for a paper.
 
     Priority order: arXiv id (``ax:``) > normalized-title hash (``th:``) >
     URL hash (``url:``). The same paper always maps to the same id no matter
     which source delivered it or how often it is re-retrieved, which is what
     makes Neo4j MERGE idempotent and lets the graph accumulate across sessions.
+
+    ``kb_id`` 按领域包分区：实包 id 形如 ``ax:{kb}:{arxiv}``（同一篇论文在
+    不同领域包内分立，互不合并）；空或 ``"default"`` 保持遗留形态。
     """
+    prefix = _kb_prefix(kb_id)
     arxiv = arxiv_key(paper.get("arxiv_id") or extract_arxiv_id(paper))
     if arxiv:
-        return f"ax:{arxiv}"
+        return f"ax:{prefix}{arxiv}"
     th = title_hash(paper.get("title", ""))
     if th:
-        return f"th:{th}"
+        return f"th:{prefix}{th}"
     url = (paper.get("url") or "").strip()
     if url:
-        return "url:" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
+        return "url:" + prefix + hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
     return ""
 
 
-def paper_identity(paper: dict) -> dict:
+def paper_identity(paper: dict, kb_id: str = "") -> dict:
     """Identity bundle for graph writes: ``{paper_id, title_hash, arxiv_id}``."""
     return {
-        "paper_id": make_paper_id(paper),
+        "paper_id": make_paper_id(paper, kb_id),
         "title_hash": title_hash(paper.get("title", "")),
         "arxiv_id": arxiv_key(paper.get("arxiv_id") or extract_arxiv_id(paper)),
     }

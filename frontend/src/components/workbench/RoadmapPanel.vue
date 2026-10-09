@@ -1,12 +1,14 @@
 <script setup lang="ts">
 // 研究路线图（规格⑤）：时间线 / 技术演进链 / 矛盾发现 / 研究空白
-// 数据源 /api/kg/roadmap（全局事实底座聚合；图不可用时后端返回 degraded 空结构）
-import { computed, onMounted, ref } from 'vue'
+// 数据源 /api/kg/roadmap（按领域包聚合；图不可用时后端返回 degraded 空结构）
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import api from '@/api/client'
 import type { KgRoadmapResponse } from '@/api/types'
 import { extractErrorMessage } from '@/api/client'
 import { useSessionStore } from '@/stores/session'
+
+const props = defineProps<{ kbId?: string }>()
 
 const store = useSessionStore()
 
@@ -24,8 +26,8 @@ async function load(): Promise<void> {
   loading.value = true
   failed.value = false
   try {
-    // scope 带上会话 id：空白优先呈现会话视图内的稀疏实体（跨会话缺口走全图）
-    data.value = await api.getKgRoadmap(store.sessionId ?? undefined)
+    // scope 带上会话 id：空白优先呈现会话视图内的稀疏实体；kbId 按领域包过滤
+    data.value = await api.getKgRoadmap(store.sessionId ?? undefined, props.kbId)
   } catch (err) {
     failed.value = true
     ElMessage.error(extractErrorMessage(err))
@@ -34,6 +36,7 @@ async function load(): Promise<void> {
   }
 }
 
+watch(() => props.kbId, () => void load())
 onMounted(() => void load())
 
 defineExpose({ load })

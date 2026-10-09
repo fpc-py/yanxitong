@@ -107,12 +107,14 @@ def _proofed_edge(source_id: str, target_id: str, rtype: str, evidence: str = ""
     return _edge(source_id, target_id, rtype, evidence=evidence, evidence_source="abstract", **props)
 
 
-def build_deterministic_graph(papers: list[dict]) -> dict:
+def build_deterministic_graph(papers: list[dict], kb_id: str = "") -> dict:
     """Derive Paper/Entity nodes and evidence-anchored edges from enrichment.
 
     Only quote-verified enrichment items are used (the enricher drops
     unverifiable ones before they reach this point), so every deterministic
     edge carries a verbatim evidence span from the paper's source text.
+    ``kb_id``（领域包）通过确定性 id 实现实例隔离：实包 id 内嵌包前缀，
+    空/默认包保持遗留形态（升级零迁移）。
     """
     paper_rows: list[dict] = []
     entities: dict[str, dict] = {}
@@ -120,7 +122,7 @@ def build_deterministic_graph(papers: list[dict]) -> dict:
     max_entities = get_settings().kg.max_entities_per_doc
 
     def add_entity(name: str, etype: str) -> str:
-        eid = make_entity_id(name)
+        eid = make_entity_id(name, kb_id)
         entities.setdefault(eid, {"entity_id": eid, "name": name.strip(), "type": etype})
         return eid
 
@@ -129,7 +131,7 @@ def build_deterministic_graph(papers: list[dict]) -> dict:
         return quotes[index].get("quote", "") if index < len(quotes) else ""
 
     for paper in papers:
-        ident = paper_identity(paper)
+        ident = paper_identity(paper, kb_id)
         pid = ident["paper_id"]
         if not pid:
             continue
@@ -218,11 +220,14 @@ class KGBuilderAgent(BaseAgent):
             # 开启 JSON 模式，避免模型在 JSON 前后夹带说明文字导致解析失败
             return self._parse_json(await self._call_llm(prompt, json_mode=True))
 
-    def _gate_extraction(self, raw: dict, source_text: str, paper_id: str) -> tuple[list[dict], list[dict], dict]:
+    def _gate_extraction(
+        self, raw: dict, source_text: str, paper_id: str, kb_id: str = ""
+    ) -> tuple[list[dict], list[dict], dict]:
         """把 LLM 输出收敛到封闭 schema，并生成证据锚定的边。
 
         返回 (entities, edges, dropped)。实体类型/关系类型不在白名单、
         关系端点悬空 ⇒ 丢弃；引文校验失败的实体间关系保留但强制进入人工复核。
+        ``kb_id`` 透传到确定性 id（实包实体与默认包实例隔离）。
         """
         entities: list[dict] = []
         edges: list[dict] = []
@@ -239,7 +244,7 @@ class KGBuilderAgent(BaseAgent):
             if etype in UNLINKED_ENTITY_TYPES:
                 dropped["unlinked_types"] += 1
                 continue
-            eid = make_entity_id(name)
+            eid = make_entity_id(name, kb_id)
             valid_uids[str(ent.get("id"))] = eid
             entities.append({"entity_id": eid, "name": name, "type": etype})
             link_type = PAPER_LINK_RELATIONS.get(etype)
@@ -263,7 +268,7 @@ class KGBuilderAgent(BaseAgent):
             ))
         return entities, edges, dropped
 
-    async def _llm_relations(self, papers: list[dict]) -> tuple[list[dict], list[dict], dict]:
+    async def _llm_relations(self, papers: list[dict], kb_id: str = "") -> tuple[list[dict], list[dict], dict]:
         """LLM 关系补充通道：配额与并发由配置控制，全程封闭 schema 约束。"""
         settings = get_settings().kg
         targets = papers[: max(1, settings.max_papers)]
@@ -278,9 +283,9 @@ class KGBuilderAgent(BaseAgent):
         for paper, outcome in zip(targets, outcomes):
             if isinstance(outcome, BaseException) or not outcome:
                 continue
-            ident = paper_identity(paper)
+            ident = paper_identity(paper, kb_id)
             paper_entities, paper_edges, paper_dropped = self._gate_extraction(
-                outcome, source_text_of(paper), ident["paper_id"]
+                outcome, source_text_of(paper), ident["paper_id"], kb_id
             )
             entities.extend(paper_entities)
             edges.extend(paper_edges)
@@ -300,12 +305,14 @@ class KGBuilderAgent(BaseAgent):
             return AgentResult(success=True, data={"skipped": True, "reason": "kg.build_enabled=false"}, confidence=1.0)
 
         session_id = state.get("session_id", "")
-        deterministic = build_deterministic_graph(papers)
+        kb_id = str(state.get("kb_id") or "default")
+        pack = kb_id != "default"
+        deterministic = build_deterministic_graph(papers, kb_id=kb_id)
         entities = deterministic["entities"]
         edges = deterministic["edges"]
         dropped: dict = {}
         if settings.llm_relation_pass:
-            llm_entities, llm_edges, dropped = await self._llm_relations(papers)
+            llm_entities, llm_edges, dropped = await self._llm_relations(papers, kb_id=kb_id)
             entities.extend(llm_entities)
             edges.extend(llm_edges)
 
@@ -318,13 +325,19 @@ class KGBuilderAgent(BaseAgent):
             "entities": len(entities),
             "relations": len(edges),
             "dropped": dropped,
+            "kb_id": kb_id,
             "degraded": False,
         }
         try:
             gs = await get_graph_store()
-            await gs.upsert_papers(deterministic["papers"])
-            await gs.upsert_entities(entities, session_id=session_id)
-            await gs.upsert_edges(edges, session_id=session_id)
+            if pack:  # 实包：写入 kb_id 属性（默认包走遗留形态，属性由 store 兜底）
+                await gs.upsert_papers(deterministic["papers"], kb_id=kb_id)
+                await gs.upsert_entities(entities, session_id=session_id, kb_id=kb_id)
+                await gs.upsert_edges(edges, session_id=session_id, kb_id=kb_id)
+            else:
+                await gs.upsert_papers(deterministic["papers"])
+                await gs.upsert_entities(entities, session_id=session_id)
+                await gs.upsert_edges(edges, session_id=session_id)
             await gs.link_session(session_id, [p["paper_id"] for p in deterministic["papers"]])
         except Exception as e:
             logger.warning("Neo4j storage degraded: %s", e)

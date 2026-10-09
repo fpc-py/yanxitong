@@ -57,13 +57,18 @@ class SupervisorAgent(BaseAgent):
         ctx, citations, evidence_docs = "", [], []
         try:
             graphrag = await get_graphrag()
-            # scope=session_id：检索限定在本研究问题（会话）自己的论文索引与图谱子图上；
+            # scope=session_id：检索限定在本研究问题（会话）自己的图谱子图上；
+            # kb_id：领域包分区（FAISS/图谱按包过滤，跨域需显式声明）；
             # user_id 启用知识库双区合并（kb:team 共享 + kb:{user_id} 私有）
-            rag = await graphrag.query(
-                query,
-                scope=state.get("session_id"),
-                user_id=state.get("user_id", ""),
-            )
+            query_kwargs: dict = {
+                "scope": state.get("session_id"),
+                "user_id": state.get("user_id", ""),
+            }
+            if state.get("kb_id"):
+                query_kwargs["kb_id"] = state["kb_id"]
+            if state.get("cross_kb_ids"):
+                query_kwargs["cross_kb_ids"] = state["cross_kb_ids"]
+            rag = await graphrag.query(query, **query_kwargs)
             ctx = rag.get("fused_context", "")
             citations = rag.get("citations", [])
             evidence_docs = papers + rag.get("kb_docs", [])
@@ -96,7 +101,8 @@ class SupervisorAgent(BaseAgent):
         try:
             from src.safety.triple_check import get_triple_verifier
 
-            triple_report = await get_triple_verifier().verify_answer(answer)
+            verify_kwargs = {"kb_id": state["kb_id"]} if state.get("kb_id") else {}
+            triple_report = await get_triple_verifier().verify_answer(answer, **verify_kwargs)
         except Exception as e:
             logger.warning("Triple check degraded: %s", e)
 

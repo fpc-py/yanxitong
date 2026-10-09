@@ -100,7 +100,7 @@ class AcademicReviewerAgent(BaseAgent):
 
         # 规格④引用溯源：草稿中的 [n] 标记回溯到检索到的论文（KG Paper 身份）
         papers = state.get("literature_results") or []
-        trace = self._trace_citations(draft, papers)
+        trace = self._trace_citations(draft, papers, str(state.get("kb_id") or ""))
         citations_block = review.get("citations")
         if not isinstance(citations_block, dict):
             citations_block = {}
@@ -147,7 +147,7 @@ class AcademicReviewerAgent(BaseAgent):
             confidence=review.get("overall_score", 60) / 100.0,
         )
 
-    def _trace_citations(self, draft: str, papers: list[dict]) -> dict:
+    def _trace_citations(self, draft: str, papers: list[dict], kb_id: str = "") -> dict:
         """把草稿的 [n] 引用标记逐条回溯到检索论文（编号 = 文献列表 1 基下标）。"""
         markers = sorted({int(n) for n in re.findall(r"\[(\d+)\]", draft or "")})
         resolved, unresolved = [], []
@@ -156,7 +156,7 @@ class AcademicReviewerAgent(BaseAgent):
                 paper = papers[n - 1]
                 resolved.append({
                     "marker": f"[{n}]",
-                    "paper_id": make_paper_id(paper),
+                    "paper_id": make_paper_id(paper, kb_id),
                     "title": paper.get("title", ""),
                     "arxiv_id": paper.get("arxiv_id", ""),
                 })

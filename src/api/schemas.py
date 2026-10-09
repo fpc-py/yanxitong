@@ -8,6 +8,34 @@ class QueryRequest(BaseModel):
     query: str = Field(..., description="User query")
     session_id: Optional[str] = Field(None)
     topic: str = Field("general")
+    kb_id: Optional[str] = Field(
+        None,
+        description="领域包 id（仅建会话时生效；缺省=未分类默认包）。换领域=新建会话",
+    )
+    cross_kb_ids: Optional[list[str]] = Field(
+        None,
+        description="显式声明的跨域参考包 id 列表（未声明=零跨包召回；可在会话中通过 PATCH 调整）",
+    )
+
+
+class PackCreateRequest(BaseModel):
+    """领域包（KnowledgeBase 分区）创建请求。"""
+
+    name: str = Field(..., min_length=1, max_length=64, description="包名，如「图神经网络」")
+    description: str = Field("", max_length=500)
+
+
+class PackPatchRequest(BaseModel):
+    """领域包改名/描述（仅 owner 可改）。"""
+
+    name: str = Field("", max_length=64)
+    description: str = Field("", max_length=500)
+
+
+class SessionKbRequest(BaseModel):
+    """会话跨域声明更新（kb_id 本身不可改，换包=新会话）。"""
+
+    cross_kb_ids: list[str] = Field(default_factory=list, description="跨域参考包 id 列表")
 
 
 class AnalyzeRequest(BaseModel):
@@ -197,6 +225,11 @@ class SessionStatus(BaseModel):
     writing_section: str = Field("", description="最近一次写作的章节 key")
     writing_draft: str = Field("", description="会话中最近一次生成的草稿全文（用于页面恢复）")
     review: Optional[dict] = Field(None, description="会话中最近一次的审阅结果（用于页面恢复）")
+    kb_id: str = Field("default", description="会话绑定的领域包 id")
+    kb_name: str = Field("", description="领域包显示名")
+    cross_kb_ids: list[str] = Field(
+        default_factory=list, description="显式声明的跨域参考包 id 列表"
+    )
 
 
 class SessionListItem(BaseModel):

@@ -348,6 +348,11 @@ export interface SessionStatus {
   writing_draft: string
   /** 会话中最近一次的审阅结果（用于页面恢复） */
   review: ReviewPayload | null
+  /** 会话绑定的领域包 id / 显示名 */
+  kb_id?: string
+  kb_name?: string
+  /** 显式声明的跨域参考包 id 列表 */
+  cross_kb_ids?: string[]
 }
 
 /** 会话列表项（历史会话侧栏） */
@@ -377,6 +382,10 @@ export interface CreateSessionBody {
   query: string
   topic: string
   session_id?: string
+  /** 领域包 id（缺省=未分类默认包）；换领域=新建会话 */
+  kb_id?: string
+  /** 显式声明的跨域参考包 id 列表（未声明=零跨包召回） */
+  cross_kb_ids?: string[]
 }
 
 /** 六道防线中的一道 */
@@ -994,6 +1003,8 @@ export interface DesignFeedbackResult {
 /** 先验统计（⑩ 闭环读侧：方法-数据集-指标矩阵 + 超参区间） */
 export interface DesignPriorsResponse {
   session_id: string
+  /** 先验所属领域包（按会话包过滤后的读侧回显） */
+  kb_id?: string
   matrix: {
     method?: string
     dataset?: string
@@ -1023,4 +1034,26 @@ export interface DesignPriorsResponse {
     [key: string]: unknown
   }[]
   total: number
+}
+
+// ---- 领域包（KnowledgeBase 分区：本体共享 · 实例隔离） ----
+
+/** 领域包（知识分区）：图谱/文献库/先验/向量索引按 kb_id 隔离 */
+export interface DomainPack {
+  kb_id: string
+  name: string
+  description: string
+  owner: string
+  created_at: string
+}
+
+/** 包统计（KgView / 包管理展示） */
+export interface PackStats {
+  kb_id: string
+  papers: number
+  entities: number
+  relations: number
+  sessions: number
+  kb_chunks: number
+  degraded?: boolean
 }

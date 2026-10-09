@@ -2,15 +2,23 @@
 
 Fusion pipeline (5 steps):
 
-1. Vector search over the session's FAISS index (entry papers).
-2. Dual-zone KB retrieval (``kb:team`` + ``kb:{user}``) — unchanged.
+1. Vector search over the FAISS paper index — partitioned by domain pack
+   (``kb_id``): the primary pack plus explicitly declared ``cross_kb_ids``
+   (weighted 0.85 and labeled); there is no silent whole-index pass.
+2. Dual-zone KB retrieval (``kb:team`` + ``kb:{user}``) — plus an optional
+   pack-tag filter (untagged chunks are 通用, visible in every pack).
 3. Deterministic entity linking: retrieved papers are the entry anchors;
-   question keywords are matched against the global entity name index, which
-   is how a session reuses facts accumulated by earlier sessions (team
-   knowledge base) without cross-session noise dominating the context.
-4. Multi-hop expansion (``kg.hops``, schema relations only) plus the
-   ``论文→方法→数据集→指标→对比方法`` chain query.
-5. Fused context with a dedicated KG section under ``kg.context_chars``.
+   question keywords are matched against the entity name index — session view
+   plus a pack-wide pass (which is how a session reuses facts accumulated by
+   earlier sessions in the same pack), and declared cross-pack hits arrive
+   weighted and labeled.
+4. Multi-hop expansion (``kg.hops``, schema relations only, confined to the
+   primary + declared packs) plus the ``论文→方法→数据集→指标→对比方法`` chain.
+5. Fused context with a dedicated KG section under ``kg.context_chars``;
+   cross-pack hits carry ``（跨域·{kb_id}）`` provenance labels.
+
+Without ``kb_id`` the legacy behavior (session-scoped vector search + two-pass
+linking over the whole graph) is preserved verbatim.
 """
 
 import json
@@ -20,7 +28,7 @@ from typing import Optional
 
 from src.knowledge.kb import query_chunks as kb_query_chunks, team_scope
 from src.knowledge.vector_store import get_vector_store
-from src.knowledge.graph_store import get_graph_store
+from src.knowledge.graph_store import CROSS_KB_WEIGHT, get_graph_store
 from src.core.config import get_settings
 from src.tools.paper_schema import make_paper_id
 
@@ -68,10 +76,28 @@ def _dedup_kb(chunks: list[dict]) -> list[dict]:
     return out
 
 
-def _format_kg_context(nodes: dict[str, dict], edges: list[dict], chains: list[dict], budget: int) -> str:
-    """Render the KG section: edges with evidence, then paper→method→... chains."""
+def _format_kg_context(
+    nodes: dict[str, dict],
+    edges: list[dict],
+    chains: list[dict],
+    budget: int,
+    kb_of: Optional[dict[str, str]] = None,
+    primary_kb: str = "",
+) -> str:
+    """Render the KG section: edges with evidence, then paper→method→... chains.
+
+    ``kb_of`` maps node id → kb_id for linked entities; with ``primary_kb``
+    set, edges touching a node from a declared cross-domain pack are labeled
+    ``（跨域·{kb_id}）`` so provenance survives into the answer prompt.
+    """
     def name_of(node_id: str) -> str:
         return (nodes.get(node_id) or {}).get("name") or node_id
+
+    def cross_tag(node_id: str) -> str:
+        kb = (kb_of or {}).get(node_id) or ""
+        if not kb or not primary_kb or kb == primary_kb:
+            return ""
+        return f"（跨域·{kb}）"
 
     lines: list[str] = []
     seen: set[tuple] = set()
@@ -81,6 +107,9 @@ def _format_kg_context(nodes: dict[str, dict], edges: list[dict], chains: list[d
             continue
         seen.add(key)
         line = f"- {name_of(edge['source'])} --{edge['type']}--> {name_of(edge['target'])}"
+        tag = cross_tag(edge["source"]) or cross_tag(edge["target"])
+        if tag:
+            line += tag
         if edge.get("value"):
             line += f" (value: {edge['value']})"
         evidence = (edge.get("evidence") or "").strip()
@@ -116,28 +145,59 @@ class GraphRAG:
     def __init__(self):
         self.settings = get_settings()
 
-    async def _kg_fusion(self, question: str, papers: list[dict], scope: Optional[str]) -> dict:
-        """Steps 3–4: entity linking + multi-hop expansion. Degrades to empties."""
+    async def _kg_fusion(
+        self,
+        question: str,
+        papers: list[dict],
+        scope: Optional[str],
+        kb_id: Optional[str] = None,
+        cross_kb_ids: Optional[list[str]] = None,
+    ) -> dict:
+        """Steps 3–4: entity linking + multi-hop expansion. Degrades to empties.
+
+        包分区（``kb_id`` 给定）：实体链接 = 本包会话视图（精确锚点）+ 本包
+        全局匹配（跨会话复用，显式声明的跨域包以 0.85 权重并入、否则零跨包
+        命中）；多跳路径只允许经过主包 + 声明包内的节点。未给 kb_id 时保持
+        旧版双 pass（会话视图 + 全图）。
+        """
         kg = self.settings.kg
-        paper_ids = [pid for pid in (make_paper_id(p) for p in papers) if pid]
+        paper_ids = [pid for pid in (make_paper_id(p, str(p.get("kb_id") or "")) for p in papers) if pid]
         if not paper_ids:
             return {"entities": [], "relations": [], "context": "", "chains": []}
+        primary = (kb_id or "").strip()
+        cross = [str(x).strip() for x in (cross_kb_ids or []) if str(x or "").strip()]
         try:
             gs = await get_graph_store()
             keywords = _question_keywords(question)
             entities: dict[str, dict] = {}
-            # 会话视图内匹配（精确）+ 全图匹配（跨会话复用，课题组知识底座）
-            for hit_scope in (scope or None, None):
+            if primary:
+                link_passes = [
+                    {"scope": scope or None, "kb_id": primary},
+                    {"scope": None, "kb_id": primary, "cross_kb_ids": cross or None},
+                ]
+            else:
+                # 兼容：会话视图内匹配（精确）+ 全图匹配（跨会话复用）
+                link_passes = [{"scope": scope or None}, {"scope": None}]
+            for pass_kwargs in link_passes:
                 if keywords:
-                    for ent in await gs.search_entities_multi(keywords[:12], limit=20, scope=hit_scope):
+                    for ent in await gs.search_entities_multi(keywords[:12], limit=20, **pass_kwargs):
                         eid = ent.get("entity_id")
                         if eid:
                             entities.setdefault(eid, ent)
             entry_ids = paper_ids + list(entities)[:30]
-            subgraph = await gs.multi_hop_paths(entry_ids, hops=kg.hops, limit=120)
+            hop_kwargs = {"kb_ids": [primary, *cross]} if primary else {}
+            subgraph = await gs.multi_hop_paths(entry_ids, hops=kg.hops, limit=120, **hop_kwargs)
             chains = await gs.chain_query(paper_ids, limit=20)
             node_map = {n["id"]: n for n in subgraph.get("nodes", [])}
-            context = _format_kg_context(node_map, subgraph.get("edges", []), chains, kg.context_chars)
+            kb_of = {
+                eid: str(ent.get("kb_id") or "")
+                for eid, ent in entities.items()
+                if ent.get("kb_id")
+            }
+            context = _format_kg_context(
+                node_map, subgraph.get("edges", []), chains, kg.context_chars,
+                kb_of=kb_of, primary_kb=primary,
+            )
             relations = [
                 {"source": e["source"], "target": e["target"], "type": e["type"]}
                 for e in subgraph.get("edges", [])
@@ -153,13 +213,19 @@ class GraphRAG:
         top_k: Optional[int] = None,
         scope: Optional[str] = None,
         user_id: str = "",
+        kb_id: Optional[str] = None,
+        cross_kb_ids: Optional[list[str]] = None,
     ) -> dict:
         """Execute dual-engine query.
 
-        ``scope`` (the session id) restricts the vector search and prefers
-        session-linked entities during linking; the graph itself is global
-        (team fact base) and multi-hop expansion may traverse facts written by
-        other sessions.
+        ``scope`` (the session id) restricts the legacy session-view vector
+        search and prefers session-linked entities during linking.
+
+        ``kb_id``（领域包分区）：给定时 Step1 向量检索按 ``[kb_id] + cross``
+        取数——主包命中权重 1.0、声明跨包 0.85 加权重排并带来源标签；Step2
+        知识库块按包标签过滤（未打标签=通用）；Step3/4 实体链接与多跳限定在
+        主包 + 声明包内（跨包带 ``（跨域·…）`` 标注）。未声明 = 零跨包命中。
+        未给 ``kb_id`` 时与旧版行为一致。
 
         ``user_id`` (an identity label like ``user:3`` / ``anon:x``) enables
         the dual-zone knowledge-base merge: shared ``kb:team`` plus the
@@ -174,17 +240,36 @@ class GraphRAG:
             - fused_context: combined text context for the LLM
         """
         k = top_k or self.settings.retriever.top_k
+        primary = (kb_id or "").strip()
+        cross = [str(x).strip() for x in (cross_kb_ids or []) if str(x or "").strip()]
         vs = get_vector_store()
 
-        # Step 1: Vector search (scoped to this research question)
-        paper_results = vs.search(question, top_k=k, scope=scope)
+        # Step 1: Vector search —— 论文索引按领域包分区（scope=kb_id，跨会话沉淀）
+        if primary:
+            scopes = [primary] + [x for x in cross if x != primary]
+            paper_results = []
+            for doc in vs.search(question, top_k=k * 2, scopes=scopes):
+                doc = dict(doc)
+                doc_kb = str(doc.get("kb_id") or doc.get("scope") or primary)
+                doc["kb_id"] = doc_kb
+                doc["cross_kb"] = doc_kb != primary
+                doc["weight"] = CROSS_KB_WEIGHT if doc["cross_kb"] else 1.0
+                doc["score"] = float(doc.get("similarity") or 0.0) * doc["weight"]
+                paper_results.append(doc)
+            paper_results.sort(key=lambda d: -d["score"])
+            paper_results = paper_results[:k]
+        else:
+            paper_results = vs.search(question, top_k=k, scope=scope)
 
         # Step 2: Dual-zone KB retrieval — must run before any early return so
         # a session whose topic only exists in uploaded documents still answers.
         kb_hits: list[dict] = []
         if user_id:
             try:
-                kb_hits = kb_query_chunks(question, scopes=[team_scope(), f"kb:{user_id}"], top_k=KB_TOP_K)
+                kb_kwargs = {"kb_id": primary} if primary else {}
+                kb_hits = kb_query_chunks(
+                    question, scopes=[team_scope(), f"kb:{user_id}"], top_k=KB_TOP_K, **kb_kwargs
+                )
             except Exception as e:
                 logger.warning("KB retrieval degraded: %s", e)
         kb_hits = _dedup_kb(kb_hits)
@@ -201,7 +286,9 @@ class GraphRAG:
             }
 
         # Steps 3–4: knowledge-graph fusion (entity linking + multi-hop)
-        fusion = await self._kg_fusion(question, paper_results, scope)
+        fusion = await self._kg_fusion(
+            question, paper_results, scope, kb_id=primary or None, cross_kb_ids=cross or None
+        )
 
         # Step 5: Build fused context (papers first, then KB chunks, then KG)
         context_parts = []
@@ -210,10 +297,11 @@ class GraphRAG:
 
         for paper in paper_results:
             n = len(citations) + 1
+            label = f"（跨域·{paper.get('kb_id')}）" if paper.get("cross_kb") else ""
             ctx = f"[{n}] {paper.get('title', 'Untitled')} "
-            ctx += f"({paper.get('year', 'N/A')}) — {paper.get('abstract', '')[:300]}"
+            ctx += f"({paper.get('year', 'N/A')}){label} — {paper.get('abstract', '')[:300]}"
             context_parts.append(ctx)
-            citations.append({
+            citation = {
                 "index": n,
                 "kind": "paper",
                 "title": paper.get("title", ""),
@@ -221,7 +309,12 @@ class GraphRAG:
                 "authors": paper.get("authors", []),
                 "year": paper.get("year", 0),
                 "similarity": paper.get("similarity", 0.0),
-            })
+            }
+            if primary:
+                citation["kb_id"] = paper.get("kb_id") or primary
+                if paper.get("cross_kb"):
+                    citation["cross_kb"] = True
+            citations.append(citation)
 
         for chunk in kb_hits:
             n = len(citations) + 1

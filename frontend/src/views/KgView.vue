@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 知识图谱工作台（规格①③⑤⑥）：全局事实底座总览 / 实体检索 / 研究路线图 / 人工复核 / 幻觉标记
-// 图谱为课题组共享的论文事实底座（全局累积），会话视图仅决定子图入口
-import { computed, onMounted, ref } from 'vue'
+// 图谱按领域包（KnowledgeBase 分区）隔离；顶部下拉可切换过滤，缺省=全部包
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api, { extractErrorMessage } from '@/api/client'
@@ -16,6 +16,11 @@ const router = useRouter()
 
 const activeTab = ref('overview')
 
+// ---------- 领域包过滤（空=全部包，向后兼容） ----------
+const kbFilter = ref('')
+
+watch(kbFilter, () => void reload())
+
 // ---------- 图谱总览 ----------
 const overview = ref<KgOverview | null>(null)
 const subgraph = ref<KgGraphData>({ nodes: [], edges: [] })
@@ -28,7 +33,9 @@ const schemaRelationTypes = computed(() => overview.value?.schema.relation_types
 async function loadOverview(): Promise<void> {
   overviewLoading.value = true
   try {
-    const jobs: Promise<unknown>[] = [api.getKgOverview().then((d) => (overview.value = d))]
+    const jobs: Promise<unknown>[] = [
+      api.getKgOverview(kbFilter.value || undefined).then((d) => (overview.value = d)),
+    ]
     if (store.sessionId) {
       jobs.push(
         api
@@ -88,7 +95,7 @@ async function onSearch(): Promise<void> {
   searching.value = true
   try {
     const scope = scopedToSession.value ? (store.sessionId ?? undefined) : undefined
-    const res = await api.searchKgEntities(q, 30, queryType.value || undefined, scope)
+    const res = await api.searchKgEntities(q, 30, queryType.value || undefined, scope, kbFilter.value || undefined)
     searchResults.value = res.entities
     searched.value = true
   } catch (err) {
@@ -123,7 +130,7 @@ const decidingKey = ref('')
 async function loadReviewQueue(): Promise<void> {
   reviewLoading.value = true
   try {
-    const res = await api.getKgReviewQueue(100)
+    const res = await api.getKgReviewQueue(100, kbFilter.value || undefined)
     reviewQueue.value = res.queue
   } catch (err) {
     ElMessage.error(extractErrorMessage(err))
@@ -168,7 +175,10 @@ async function reload(): Promise<void> {
   return loadOverview()
 }
 
-onMounted(() => void loadOverview())
+onMounted(() => {
+  void store.loadPacks()
+  void loadOverview()
+})
 </script>
 
 <template>
@@ -182,6 +192,10 @@ onMounted(() => void loadOverview())
         </p>
       </div>
       <div class="page-actions">
+        <el-select v-model="kbFilter" placeholder="全部领域包" clearable class="kb-filter" size="small">
+          <el-option label="全部领域包" value="" />
+          <el-option v-for="p in store.packs" :key="p.kb_id" :label="p.name" :value="p.kb_id" />
+        </el-select>
         <el-button size="small" :loading="backfilling" @click="onBackfill">从历史会话回填</el-button>
         <el-button size="small" @click="reload">重新加载</el-button>
       </div>
@@ -356,7 +370,7 @@ onMounted(() => void loadOverview())
 
       <!-- 研究路线图 -->
       <el-tab-pane label="研究路线图" name="roadmap">
-        <RoadmapPanel v-if="activeTab === 'roadmap'" />
+        <RoadmapPanel v-if="activeTab === 'roadmap'" :kb-id="kbFilter || undefined" />
       </el-tab-pane>
 
       <!-- 人工复核 -->
@@ -443,6 +457,10 @@ onMounted(() => void loadOverview())
 <style scoped>
 .kg-tabs :deep(.el-tabs__header) {
   margin-bottom: 18px;
+}
+
+.kb-filter {
+  width: 170px;
 }
 
 .kg-tabs :deep(.el-tabs__item) {

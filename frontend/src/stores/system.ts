@@ -61,10 +61,14 @@ export const useSystemStore = defineStore('system', () => {
     }
   }
 
-  /** 上传知识库文档（library=team 共享库需登录）；失败抛出，由调用方 ElMessage 提示 */
-  async function uploadKnowledge(file: File, library: 'team' | 'personal' = 'personal'): Promise<KnowledgeUploadResult> {
+  /** 上传知识库文档（library=team 共享库需登录；kbId=领域包标签，空=通用全包可见）；失败抛出，由调用方 ElMessage 提示 */
+  async function uploadKnowledge(
+    file: File,
+    library: 'team' | 'personal' = 'personal',
+    kbId = '',
+  ): Promise<KnowledgeUploadResult> {
     try {
-      const res = await api.uploadKnowledge(file, library)
+      const res = await api.uploadKnowledge(file, library, kbId)
       await loadKnowledgeFiles()
       return res
     } catch (e) {

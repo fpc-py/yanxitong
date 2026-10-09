@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 会话问答：创建会话 + 连续提问，渲染 Markdown 回答、引用、置信度与阶段
-import { computed, nextTick, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import MarkdownView from '@/components/MarkdownView.vue'
 import CitationList from '@/components/CitationList.vue'
 import { useSessionStore } from '@/stores/session'
@@ -13,6 +13,31 @@ const auth = useAuthStore()
 const topicInput = ref('')
 const queryInput = ref('')
 const listEl = ref<HTMLDivElement | null>(null)
+
+onMounted(() => void store.loadPacks())
+
+/** 新建领域包并立即选中（首条消息将绑定该包） */
+async function onCreatePack(): Promise<void> {
+  let name = ''
+  try {
+    const { value } = await ElMessageBox.prompt(
+      '领域包用于隔离图谱 / 文献库 / 先验：同包会话跨会话沉淀，跨包需显式声明。',
+      '新建领域包',
+      {
+        confirmButtonText: '创建',
+        cancelButtonText: '取消',
+        inputPlaceholder: '例如：图神经网络',
+        inputValidator: (v: string) => (v && v.trim() ? true : '名称不能为空'),
+      },
+    )
+    name = (value || '').trim()
+  } catch {
+    return // 取消
+  }
+  const pack = await store.createPack(name)
+  if (pack) ElMessage.success(`已创建并选中：${pack.name}`)
+  else ElMessage.error(store.error || '创建失败')
+}
 
 const PHASE_LABELS: Record<string, string> = {
   literature: '文献调研',
@@ -104,6 +129,24 @@ function reset(): void {
 
           <label class="field-label">研究主题（topic）</label>
           <el-input v-model="topicInput" placeholder="例如：图神经网络在药物分子性质预测中的应用" size="large" />
+
+          <label class="field-label" style="margin-top: 14px">领域包</label>
+          <div class="kb-pick-row">
+            <el-select
+              class="kb-pick"
+              :model-value="store.pendingKbId"
+              @update:model-value="store.setPendingKbId"
+            >
+              <el-option
+                v-for="p in store.packs"
+                :key="p.kb_id"
+                :label="p.name"
+                :value="p.kb_id"
+              />
+            </el-select>
+            <el-button size="small" @click="onCreatePack">新建领域包</el-button>
+            <span class="hint-line">同包会话共享图谱 / 文献库 / 先验；换领域 = 新建会话</span>
+          </div>
 
           <label class="field-label" style="margin-top: 14px">首个问题</label>
           <el-input
@@ -268,6 +311,17 @@ function reset(): void {
 .create-title {
   font-size: 18px;
   margin: 0 0 6px;
+}
+
+.kb-pick-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.kb-pick {
+  width: 240px;
 }
 
 .quick-row {

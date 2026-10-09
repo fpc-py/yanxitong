@@ -16,6 +16,7 @@ import type {
   DesignFeedbackResult,
   DesignPriorsResponse,
   DesignRunManifest,
+  DomainPack,
   HealthResponse,
   KgAuditEntry,
   KgBackfillResult,
@@ -34,6 +35,7 @@ import type {
   LiteratureMatrixResponse,
   MeResponse,
   MetricsSummary,
+  PackStats,
   QueryResponse,
   ResearchGapsResponse,
   SessionListItem,
@@ -391,11 +393,16 @@ const api = {
     return data
   },
 
-  /** 16. 上传知识库文档（.txt/.md/.pdf；library=team 需登录） */
-  async uploadKnowledge(file: File, library: 'team' | 'personal' = 'personal'): Promise<KnowledgeUploadResult> {
+  /** 16. 上传知识库文档（.txt/.md/.pdf；library=team 需登录；kbId=领域包标签，空=通用） */
+  async uploadKnowledge(
+    file: File,
+    library: 'team' | 'personal' = 'personal',
+    kbId = '',
+  ): Promise<KnowledgeUploadResult> {
     const form = new FormData()
     form.append('file', file)
     form.append('library', library)
+    if (kbId) form.append('kb_id', kbId)
     const { data } = await http.post<KnowledgeUploadResult>('/knowledge/upload', form, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 300_000,
@@ -450,16 +457,18 @@ const api = {
 
   // ---------- 知识图谱（/api/kg/*，全部端点在图不可用时返回 degraded 降级结构） ----------
 
-  /** 23. 图谱总览：计数 + 封闭 schema（实体/关系白名单） */
-  async getKgOverview(): Promise<KgOverview> {
-    const { data } = await http.get<KgOverview>('/kg/overview')
+  /** 23. 图谱总览：计数 + 封闭 schema（实体/关系白名单）；kbId 给定后仅统计该包 */
+  async getKgOverview(kbId?: string): Promise<KgOverview> {
+    const { data } = await http.get<KgOverview>('/kg/overview', {
+      params: { kb_id: kbId || undefined },
+    })
     return data
   },
 
-  /** 24. 实体检索（scope=会话 id 时限定会话视图，缺省全图共享复用） */
-  async searchKgEntities(q: string, limit = 20, type?: string, scope?: string): Promise<KgEntitySearchResponse> {
+  /** 24. 实体检索（scope=会话 id 时限定会话视图；kbId 按领域包收窄） */
+  async searchKgEntities(q: string, limit = 20, type?: string, scope?: string, kbId?: string): Promise<KgEntitySearchResponse> {
     const { data } = await http.get<KgEntitySearchResponse>('/kg/entities/search', {
-      params: { q, limit, type: type || undefined, scope: scope || undefined },
+      params: { q, limit, type: type || undefined, scope: scope || undefined, kb_id: kbId || undefined },
     })
     return data
   },
@@ -492,9 +501,11 @@ const api = {
     return data
   },
 
-  /** 29. 人工复核队列 */
-  async getKgReviewQueue(limit = 50): Promise<KgReviewQueueResponse> {
-    const { data } = await http.get<KgReviewQueueResponse>('/kg/review-queue', { params: { limit } })
+  /** 29. 人工复核队列（kbId 可选按领域包收窄） */
+  async getKgReviewQueue(limit = 50, kbId?: string): Promise<KgReviewQueueResponse> {
+    const { data } = await http.get<KgReviewQueueResponse>('/kg/review-queue', {
+      params: { limit, kb_id: kbId || undefined },
+    })
     return data
   },
 
@@ -507,17 +518,19 @@ const api = {
     return data
   },
 
-  /** 31. 研究路线图（时间线 / 演进链 / 矛盾 / 空白） */
-  async getKgRoadmap(sessionId?: string): Promise<KgRoadmapResponse> {
+  /** 31. 研究路线图（时间线 / 演进链 / 矛盾 / 空白；kbId 按领域包过滤） */
+  async getKgRoadmap(sessionId?: string, kbId?: string): Promise<KgRoadmapResponse> {
     const { data } = await http.get<KgRoadmapResponse>('/kg/roadmap', {
-      params: { session_id: sessionId || undefined },
+      params: { session_id: sessionId || undefined, kb_id: kbId || undefined },
     })
     return data
   },
 
-  /** 32. 研究空白候选（低度数实体） */
-  async getKgGaps(scope?: string, limit = 20): Promise<{ count: number; gaps: { entity_id: string; name: string; type: string; degree: number }[] }> {
-    const { data } = await http.get('/kg/gaps', { params: { scope: scope || undefined, limit } })
+  /** 32. 研究空白候选（低度数实体；kbId 按领域包过滤） */
+  async getKgGaps(scope?: string, limit = 20, kbId?: string): Promise<{ count: number; gaps: { entity_id: string; name: string; type: string; degree: number }[] }> {
+    const { data } = await http.get('/kg/gaps', {
+      params: { scope: scope || undefined, limit, kb_id: kbId || undefined },
+    })
     return data
   },
 
@@ -546,6 +559,34 @@ const api = {
   /** 36. 从历史会话重建图谱（确定性通道，幂等） */
   async kgBackfill(): Promise<KgBackfillResult> {
     const { data } = await http.post<KgBackfillResult>('/kg/backfill')
+    return data
+  },
+
+  // ---------- 领域包（KnowledgeBase 分区：本体共享 · 实例隔离 · 跨域显式声明） ----------
+
+  /** 37. 当前身份可见的领域包列表（含隐式「未分类（默认）」，恒排第一） */
+  async listPacks(): Promise<DomainPack[]> {
+    const { data } = await http.get<{ packs: DomainPack[] }>('/knowledge/packs')
+    return data.packs ?? []
+  },
+
+  /** 38. 新建领域包（归创建者所有） */
+  async createPack(name: string, description = ''): Promise<DomainPack> {
+    const { data } = await http.post<DomainPack>('/knowledge/packs', { name, description })
+    return data
+  },
+
+  /** 39. 包统计（论文/实体/关系/会话/KB 块） */
+  async getPackStats(kbId: string): Promise<PackStats> {
+    const { data } = await http.get<PackStats>(`/knowledge/packs/${encodeURIComponent(kbId)}/stats`)
+    return data
+  },
+
+  /** 40. 更新会话的跨域参考声明（kb_id 本身不可改，换包=新建会话） */
+  async patchSessionKb(sessionId: string, crossKbIds: string[]): Promise<{ ok: boolean; cross_kb_ids: string[] }> {
+    const { data } = await http.patch<{ ok: boolean; cross_kb_ids: string[] }>(`/session/${sessionId}/kb`, {
+      cross_kb_ids: crossKbIds,
+    })
     return data
   },
 }

@@ -14,6 +14,7 @@ from src.api.schemas import (
     SystemCapabilities, DefenseItem, MetricsSummary,
     KnowledgeFileItem, KnowledgeUploadResult,
     ReviewDecisionRequest,
+    PackCreateRequest, PackPatchRequest, SessionKbRequest,
 )
 from src.api.deps import Identity, consume_question_quota, get_identity
 from src.api.auth_routes import router as auth_router
@@ -22,8 +23,10 @@ from src.core.config import get_settings
 from src.workflows.state import create_initial_state
 from src.workflows.supervisor_graph import get_research_app, analysis_answer
 from src.workflows import tracing
+from src.knowledge import pack_store
 from src.knowledge.kb import (
     add_chunks as kb_add_chunks,
+    count_chunks_by_kb as kb_count_chunks,
     find_by_hash as kb_find_by_hash,
     find_chunk as kb_find_chunk,
     get_kb_store,
@@ -55,12 +58,19 @@ def _get_owned_state(session_id: str, identity: Identity) -> dict:
     """Return the session state, or 404 when missing or owned by someone else.
 
     会话按身份（user:<id> / anon:<anon_id>）隔离：不同用户、不同浏览器
-    的匿名体验者互相看不到对方的研究会话。
+    的匿名体验者互相看不到对方的研究会话。旧会话（无 kb_id 字段）懒归属
+    默认包——与遗留数据（kb_id 为空的图/向量）天然一致。
     """
     state = _sessions.get(session_id)
     if not state or state.get("user_id") != identity.label:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    state.setdefault("kb_id", pack_store.DEFAULT_KB)
     return state
+
+
+def _session_kb(state: dict) -> str:
+    """会话的领域包 id；旧会话与未分组一律回落到默认包。"""
+    return str(state.get("kb_id") or pack_store.DEFAULT_KB)
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -71,9 +81,19 @@ async def health_check():
 @router.post("/session", response_model=QueryResponse)
 async def create_session_and_query(req: QueryRequest, request: Request):
     identity = await get_identity(request)
+    kb_id = pack_store.validate_kb_id(req.kb_id, identity.label)
+    if not kb_id:
+        raise HTTPException(status_code=400, detail="领域包不存在或无权使用")
     quota_remaining = await consume_question_quota(identity)
     session_id = req.session_id or str(uuid.uuid4())[:12]
-    state = create_initial_state(session_id=session_id, user_id=identity.label, topic=req.topic, query=req.query)
+    cross_kb_ids = [
+        c for c in (pack_store.validate_kb_id(x, identity.label) for x in (req.cross_kb_ids or []))
+        if c and c != kb_id
+    ]
+    state = create_initial_state(
+        session_id=session_id, user_id=identity.label, topic=req.topic, query=req.query,
+        kb_id=kb_id, cross_kb_ids=cross_kb_ids,
+    )
     _persist_session(session_id, state)
     app = get_research_app()
     config = {"configurable": {"thread_id": session_id}}
@@ -292,13 +312,14 @@ async def download_design_package(session_id: str, run_id: str, request: Request
 async def design_feedback(session_id: str, req: DesignFeedbackRequest, request: Request):
     """规格⑩闭环：实测结果回流 → 先验存储（必写）+ KG Experiment/ACHIEVES（尽力）。"""
     identity = await get_identity(request)
-    _get_owned_state(session_id, identity)
+    state = _get_owned_state(session_id, identity)
     from src.agents.experiment_designer.agent import record_feedback
 
     result = await record_feedback(
         session_id, req.run_id,
         candidate_id=req.candidate_id, metrics=req.metrics,
         cost=req.cost, duration_hours=req.duration_hours, notes=req.notes,
+        kb_id=str(state.get("kb_id") or ""),
     )
     if not result.get("ok") and result.get("error"):
         raise HTTPException(status_code=404, detail=result["error"])
@@ -307,15 +328,20 @@ async def design_feedback(session_id: str, req: DesignFeedbackRequest, request: 
 
 @router.get("/session/{session_id}/design/priors")
 async def design_priors(session_id: str, request: Request, task: str = "", method: str = ""):
-    """方法-数据集-指标矩阵 + 先验统计（闭环反馈的读侧，供前端展示与再设计）。"""
+    """方法-数据集-指标矩阵 + 先验统计（闭环反馈的读侧，供前端展示与再设计）。
+
+    先验按会话所属领域包过滤（同包跨会话沉淀）；``task``/``method`` 可进一步收窄。
+    """
     identity = await get_identity(request)
-    _get_owned_state(session_id, identity)
+    state = _get_owned_state(session_id, identity)
     from src.knowledge import prior_store
 
+    kb = _session_kb(state)
     return {
         "session_id": session_id,
-        "matrix": prior_store.query_matrix(task=task, method=method),
-        "priors": prior_store.query_priors(task=task, method=method),
+        "kb_id": kb,
+        "matrix": prior_store.query_matrix(task=task, method=method, kb_id=kb),
+        "priors": prior_store.query_priors(task=task, method=method, kb_id=kb),
         "recent": prior_store.recent_experiments(limit=10, session_id=session_id),
         "total": prior_store.count_experiments(),
     }
@@ -469,6 +495,14 @@ async def get_session_status(session_id: str, request: Request):
     exp = state.get("experiment_results", {})
     review = exp.get("review") if isinstance(exp, dict) else None
     draft = state.get("writing_draft", "")
+    kb = _session_kb(state)
+    kb_name = pack_store.DEFAULT_KB_NAME
+    try:
+        pack = pack_store.get_pack(kb)
+        if pack:
+            kb_name = pack.get("name", "") or kb_name
+    except Exception as e:  # 包注册表降级不影响会话状态
+        logger.warning("Pack lookup degraded: %s", e)
     return SessionStatus(
         session_id=session_id,
         topic=state.get("research_topic", ""),
@@ -483,7 +517,29 @@ async def get_session_status(session_id: str, request: Request):
         writing_section=state.get("writing_section", ""),
         writing_draft=draft or "",
         review=review if isinstance(review, dict) and review else None,
+        kb_id=kb,
+        kb_name=kb_name,
+        cross_kb_ids=[str(c) for c in (state.get("cross_kb_ids") or [])],
     )
+
+
+@router.patch("/session/{session_id}/kb")
+async def patch_session_kb(session_id: str, req: SessionKbRequest, request: Request):
+    """更新会话的跨域参考声明（kb_id 本身不可改，换包=新建会话）。
+
+    仅接受「默认包或本人持有」的包 id；过滤在检索时生效（读侧过滤、
+    不触发重算），故声明变更立即影响后续提问、且是安全操作。
+    """
+    identity = await get_identity(request)
+    state = _get_owned_state(session_id, identity)
+    kb = _session_kb(state)
+    cross = [
+        c for c in (pack_store.validate_kb_id(x, identity.label) for x in req.cross_kb_ids)
+        if c and c != kb
+    ]
+    state["cross_kb_ids"] = cross
+    _persist_session(session_id, state)
+    return {"ok": True, "session_id": session_id, "kb_id": kb, "cross_kb_ids": cross}
 
 
 @router.get("/session/{session_id}/citation-chain", response_model=CitationChainResponse)
@@ -627,17 +683,28 @@ async def metrics_summary():
 
 
 @router.post("/knowledge/upload", response_model=KnowledgeUploadResult)
-async def upload_knowledge(request: Request, file: UploadFile = File(...), library: str = Form("personal")):
+async def upload_knowledge(
+    request: Request,
+    file: UploadFile = File(...),
+    library: str = Form("personal"),
+    kb_id: str = Form(""),
+):
     """上传文档入库：PDF 走两级解析链（PyMuPDF → OCR），txt/md 直接解析。
 
     library=team 需登录（课题组共享，全员可检索）；personal 仅上传者可见。
     相同内容（sha256）重复上传直接返回 deduped，不重复入库。
+    ``kb_id``：可选领域包标签（空=通用，任何领域包均可召回）。
     """
     identity = await get_identity(request)
     if library not in ("team", "personal"):
         raise HTTPException(status_code=400, detail="library 仅支持 team / personal")
     if library == "team" and identity.is_anonymous:
         raise HTTPException(status_code=403, detail={"code": "login_required", "message": "共享库需要登录后上传"})
+    kb_tag = str(kb_id or "").strip()
+    if kb_tag and not pack_store.validate_kb_id(kb_tag, identity.label):
+        raise HTTPException(status_code=400, detail="领域包不存在或无权使用")
+    if kb_tag == pack_store.DEFAULT_KB:
+        kb_tag = ""
     settings = get_settings()
     filename = Path(file.filename).name if file.filename else "unnamed"
     suffix = Path(filename).suffix.lower()
@@ -674,11 +741,13 @@ async def upload_knowledge(request: Request, file: UploadFile = File(...), libra
         )
     chunks = chunk_parsed_doc(doc)
 
-    added = kb_add_chunks(filename, chunks, library=library, owner=identity.label, content_hash=content_hash)
+    added = kb_add_chunks(filename, chunks, library=library, owner=identity.label,
+                          content_hash=content_hash, kb_id=kb_tag)
     if added == 0:
         raise HTTPException(status_code=400, detail="文本过短或与库中已有内容完全重复，未形成可检索块")
     try:
-        ner = await kb_index_chunks(chunks, library=library, owner=identity.label, filename=filename)
+        ner = await kb_index_chunks(chunks, library=library, owner=identity.label,
+                                    filename=filename, kb_id=kb_tag)
         logger.info("KB 图谱写入 %s: %s", filename, ner)
     except Exception as exc:  # NER 失败不影响入库
         logger.warning("KB NER 降级: %s", exc)
@@ -693,6 +762,58 @@ async def upload_knowledge(request: Request, file: UploadFile = File(...), libra
 async def list_knowledge_files(request: Request):
     identity = await get_identity(request)
     return [KnowledgeFileItem(**f) for f in kb_list_files(owner=identity.label)]
+
+
+# ---- 领域包（KnowledgeBase 分区）----
+
+@router.get("/knowledge/packs")
+async def list_knowledge_packs(request: Request):
+    """当前身份可见的领域包：本人持有的包 + 隐式默认包（未分类，恒排第一）。"""
+    identity = await get_identity(request)
+    return {"packs": pack_store.list_packs(identity.label)}
+
+
+@router.post("/knowledge/packs")
+async def create_knowledge_pack(req: PackCreateRequest, request: Request):
+    """新建领域包（归创建者所有），返回 {kb_id, name, ...}。"""
+    identity = await get_identity(request)
+    pack = pack_store.create_pack(identity.label, req.name, req.description)
+    if not pack:
+        raise HTTPException(status_code=400, detail="包名不能为空或存储不可用")
+    return pack
+
+
+@router.patch("/knowledge/packs/{kb_id}")
+async def update_knowledge_pack(kb_id: str, req: PackPatchRequest, request: Request):
+    """改名/描述（仅 owner 可改；默认包不可改）。"""
+    identity = await get_identity(request)
+    pack = pack_store.update_pack(kb_id, identity.label, req.name, req.description)
+    if not pack:
+        raise HTTPException(status_code=404, detail="领域包不存在或无权修改")
+    return pack
+
+
+@router.get("/knowledge/packs/{kb_id}/stats")
+async def get_knowledge_pack_stats(kb_id: str, request: Request):
+    """包统计（论文/实体/关系/会话/KB 块计数），供包管理界面展示。"""
+    identity = await get_identity(request)
+    kb = pack_store.validate_kb_id(kb_id, identity.label)
+    if not kb:
+        raise HTTPException(status_code=404, detail="领域包不存在或无权查看")
+    stats: dict = {"kb_id": kb, "papers": 0, "entities": 0, "relations": 0, "sessions": 0, "kb_chunks": 0}
+    try:
+        gs = await _graph()
+        stats.update(await gs.kb_stats(kb))
+    except Exception as e:  # Neo4j 不可达仅降级计数
+        logger.warning("Pack stats degraded: %s", e)
+        stats["degraded"] = True
+    stats["sessions"] = sum(
+        1 for s in _sessions.values()
+        if str(s.get("user_id") or "") == identity.label
+        and str(s.get("kb_id") or pack_store.DEFAULT_KB) == kb
+    )
+    stats["kb_chunks"] = kb_count_chunks(kb)
+    return stats
 
 
 @router.get("/knowledge/chunk")
@@ -719,11 +840,15 @@ async def delete_knowledge_file(filename: str, request: Request, library: str = 
 # ---- Knowledge-graph endpoints (规格①③⑤⑥: 全局事实底座 + 复核 + 洞察 + 审计) ----
 
 @router.get("/kg/overview")
-async def kg_overview():
-    """图谱总览：Papers/Sessions/实体与关系计数 + 封闭 schema（配置为唯一权威）。"""
+async def kg_overview(kb_id: str | None = None):
+    """图谱总览：Papers/Sessions/实体与关系计数 + 封闭 schema（配置为唯一权威）。
+
+    ``kb_id`` 给定后仅统计该领域包（含未迁移的遗留数据，归属默认包）。
+    """
     try:
         gs = await _graph()
-        return await gs.graph_overview()
+        kb_kwargs = {"kb_id": kb_id} if kb_id else {}
+        return await gs.graph_overview(**kb_kwargs)
     except Exception as e:
         logger.warning("KG overview degraded: %s", e)
         return _degraded(e, papers=0, sessions=0, entities={}, entities_total=0,
@@ -731,11 +856,16 @@ async def kg_overview():
 
 
 @router.get("/kg/entities/search")
-async def kg_entity_search(q: str, limit: int = 20, type: str | None = None, scope: str | None = None):
-    """实体检索：名称关键词匹配（scope=会话 id 时限定该会话可达实体，跨会话复用走全图）。"""
+async def kg_entity_search(q: str, limit: int = 20, type: str | None = None, scope: str | None = None,
+                           kb_id: str | None = None):
+    """实体检索：名称关键词匹配（scope=会话 id 时限定该会话可达实体，跨会话复用走全图）。
+
+    ``kb_id`` 给定后按领域包收窄（无跨域声明时不混入其他包）。
+    """
     try:
         gs = await _graph()
-        entities = await gs.search_entities_multi([q], limit=limit, scope=scope)
+        kb_kwargs = {"kb_id": kb_id} if kb_id else {}
+        entities = await gs.search_entities_multi([q], limit=limit, scope=scope, **kb_kwargs)
         # 归一化节点形态：subgraph/neighbors 端点的节点用 id，此处把原始属性里的 entity_id 映射过去
         entities = [{**e, "id": e.get("entity_id") or e.get("id") or ""} for e in entities]
         if type:
@@ -799,11 +929,12 @@ async def kg_evidence_path(target: str, limit: int = 30):
 
 
 @router.get("/kg/review-queue")
-async def kg_review_queue(limit: int = 50):
+async def kg_review_queue(limit: int = 50, kb_id: str | None = None):
     """人工复核队列（规格③）：抽样边 + 引文校验失败的强制复核边。"""
     try:
         gs = await _graph()
-        queue = await gs.review_queue(limit=max(1, min(limit, 200)))
+        kb_kwargs = {"kb_id": kb_id} if kb_id else {}
+        queue = await gs.review_queue(limit=max(1, min(limit, 200)), **kb_kwargs)
         return {"count": len(queue), "queue": queue}
     except Exception as e:
         logger.warning("KG review queue degraded: %s", e)
@@ -835,23 +966,28 @@ async def kg_mark_reviewed(edge_key: str, req: ReviewDecisionRequest, request: R
 
 
 @router.get("/kg/roadmap")
-async def kg_roadmap(session_id: str | None = None):
-    """研究洞察（规格⑤）：时间线 / 技术演进链 / 矛盾 / 研究空白。"""
+async def kg_roadmap(session_id: str | None = None, kb_id: str | None = None):
+    """研究洞察（规格⑤）：时间线 / 技术演进链 / 矛盾 / 研究空白。
+
+    ``kb_id`` 给定后仅统计该领域包；``session_id`` 限定会话视图。
+    """
     from src.analysis.roadmap import RoadmapBuilder
 
     try:
-        return await RoadmapBuilder().build(scope=session_id)
+        kb_kwargs = {"kb_id": kb_id} if kb_id else {}
+        return await RoadmapBuilder().build(scope=session_id, **kb_kwargs)
     except Exception as e:
         logger.warning("KG roadmap degraded: %s", e)
         return _degraded(e, timeline=[], evolution=[], contradictions=[], gaps=[])
 
 
 @router.get("/kg/gaps")
-async def kg_gaps(scope: str | None = None, limit: int = 20):
-    """研究空白候选：低度数实体（会话视图内优先）。"""
+async def kg_gaps(scope: str | None = None, limit: int = 20, kb_id: str | None = None):
+    """研究空白候选：低度数实体（会话视图内优先，可按领域包收窄）。"""
     try:
         gs = await _graph()
-        gaps = await gs.find_sparse_entities(scope=scope, limit=max(1, min(limit, 100)))
+        kb_kwargs = {"kb_id": kb_id} if kb_id else {}
+        gaps = await gs.find_sparse_entities(scope=scope, limit=max(1, min(limit, 100)), **kb_kwargs)
         return {"count": len(gaps), "gaps": gaps}
     except Exception as e:
         logger.warning("KG gaps degraded: %s", e)

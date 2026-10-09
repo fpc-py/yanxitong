@@ -149,12 +149,18 @@ class ResearchState(TypedDict):
     writing_section: str
     citation_style: str
 
+    # --- 领域包（KnowledgeBase 分区） ---------------------------------------------
+    kb_id: str                                       # 会话绑定的领域包，图/向量/先验按其隔离
+    cross_kb_ids: list[str]                          # 显式声明的跨域参考包（未声明=零跨包命中）
+
 
 def create_initial_state(
     session_id: str,
     user_id: str,
     topic: str,
     query: str,
+    kb_id: str = "default",
+    cross_kb_ids: list[str] | None = None,
 ) -> ResearchState:
     """Factory that returns a clean initial ResearchState.
 
@@ -163,6 +169,8 @@ def create_initial_state(
         user_id: Identifier of the authenticated user.
         topic: High-level research topic for the whole session.
         query: The concrete question the pipeline should answer now.
+        kb_id: 绑定的领域包（缺省走隐式默认包，遗留行为兼容）。
+        cross_kb_ids: 显式声明的跨域参考包 id 列表。
 
     Returns:
         A fully populated state with empty accumulators, starting in the
@@ -172,6 +180,8 @@ def create_initial_state(
         session_id=session_id,
         user_id=user_id,
         research_topic=topic,
+        kb_id=kb_id or "default",
+        cross_kb_ids=[str(x) for x in (cross_kb_ids or []) if str(x).strip()],
         current_phase="literature",
         task_queue=[],
         completed_tasks=[],

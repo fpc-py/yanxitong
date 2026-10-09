@@ -48,8 +48,9 @@ async def kg_build_node(state: ResearchState) -> ResearchState:
         try:
             from src.knowledge.graph_store import get_graph_store
             gs = await get_graph_store()
+            kb_kwargs = {"kb_id": state["kb_id"]} if state.get("kb_id") else {}
             stats["sparse_entities"] = (await gs.find_sparse_entities(
-                scope=state.get("session_id") or None, limit=10
+                scope=state.get("session_id") or None, limit=10, **kb_kwargs
             ))[:5]
         except Exception as e:
             logger.warning("Sparse entity query degraded: %s", e)
@@ -71,7 +72,11 @@ async def kg_build_node(state: ResearchState) -> ResearchState:
             from src.analysis.roadmap import RoadmapBuilder
 
             state["research_roadmap"] = await asyncio.wait_for(
-                RoadmapBuilder().build(scope=state.get("session_id") or None), timeout=6
+                RoadmapBuilder().build(
+                    scope=state.get("session_id") or None,
+                    kb_id=state.get("kb_id") or None,
+                ),
+                timeout=6,
             )
         except Exception as e:
             logger.warning("Roadmap degraded: %s", e)

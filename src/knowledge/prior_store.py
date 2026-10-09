@@ -51,12 +51,23 @@ CREATE TABLE IF NOT EXISTS experiments (
     duration_hours REAL,
     config_json TEXT NOT NULL DEFAULT '{}',
     source TEXT NOT NULL DEFAULT 'feedback',
-    notes TEXT NOT NULL DEFAULT ''
+    notes TEXT NOT NULL DEFAULT '',
+    kb_id TEXT NOT NULL DEFAULT 'default'
 );
 CREATE INDEX IF NOT EXISTS idx_experiments_mdm ON experiments(method, dataset, metric);
 CREATE INDEX IF NOT EXISTS idx_experiments_session ON experiments(session_id);
 CREATE INDEX IF NOT EXISTS idx_experiments_task ON experiments(task);
 """
+
+
+def _ensure_kb_column(conn: sqlite3.Connection) -> None:
+    """旧库补 ``kb_id`` 列（幂等）：先验从此按领域包隔离。"""
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(experiments)")}
+        if "kb_id" not in cols:
+            conn.execute("ALTER TABLE experiments ADD COLUMN kb_id TEXT NOT NULL DEFAULT 'default'")
+    except Exception as exc:  # 补列失败不阻塞读写（读侧 coalesce 兼容）
+        logger.warning("prior_store kb_id column degraded: %s", exc)
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -67,8 +78,17 @@ def _get_conn() -> sqlite3.Connection:
             os.makedirs(parent, exist_ok=True)
         _conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         _conn.executescript(_SCHEMA)
+        _ensure_kb_column(_conn)
         _conn.commit()
     return _conn
+
+
+def _kb_clause(kb_id: str, where: list[str], params: list[Any]) -> None:
+    """领域包过滤：有值时收窄到该包（未迁移空值视同默认包）；空=不过滤（旧行为）。"""
+    kb = (kb_id or "").strip()
+    if kb:
+        where.append("COALESCE(NULLIF(kb_id, ''), 'default') = ?")
+        params.append(kb)
 
 
 def _write(sql: str, params: tuple) -> Optional[int]:
@@ -110,12 +130,16 @@ def record_experiment(
     config: Optional[dict] = None,
     source: str = "feedback",
     notes: str = "",
+    kb_id: str = "",
 ) -> Optional[int]:
-    """Append one finished-experiment row; returns the row id (None on failure)."""
+    """Append one finished-experiment row; returns the row id (None on failure).
+
+    每行归属一个领域包（``kb_id``，空=默认包）——先验从此按包隔离查询。
+    """
     return _write(
         "INSERT INTO experiments (session_id, run_id, candidate_id, task, method, dataset,"
-        " metric, value, cost, duration_hours, config_json, source, notes)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " metric, value, cost, duration_hours, config_json, source, notes, kb_id)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             str(session_id), str(run_id), str(candidate_id), str(task), str(method),
             str(dataset), str(metric),
@@ -124,6 +148,7 @@ def record_experiment(
             float(duration_hours) if duration_hours is not None else None,
             json.dumps(config or {}, ensure_ascii=False, default=str),
             str(source), str(notes),
+            (kb_id or "").strip() or "default",
         ),
     )
 
@@ -132,11 +157,12 @@ def query_matrix(
     task: str = "",
     method: str = "",
     limit: int = 200,
+    kb_id: str = "",
 ) -> list[dict]:
     """Aggregate (method, dataset, metric) rows into n/mean/std/min/max stats.
 
     std is the population standard deviation computed from AVG(v²)−AVG(v)²,
-    which SQLite does not provide natively.
+    which SQLite does not provide natively. ``kb_id`` 有值时只统计该领域包。
     """
     where = ["value IS NOT NULL"]
     params: list[Any] = []
@@ -146,6 +172,7 @@ def query_matrix(
     if method:
         where.append("method = ?")
         params.append(method)
+    _kb_clause(kb_id, where, params)
     params.append(int(limit))
     rows = _rows(
         "SELECT method, dataset, metric, COUNT(*) AS n, AVG(value) AS mean,"
@@ -181,6 +208,7 @@ def query_priors(
     task: str = "",
     dataset: str = "",
     metric: str = "",
+    kb_id: str = "",
 ) -> dict:
     """Priors for one optimisation run.
 
@@ -188,6 +216,7 @@ def query_priors(
     cost: {...}|None, duration: {...}|None}``.  ``hyperparams`` aggregates the
     numeric values found in each row's ``config.hyperparams`` plus any numeric
     top-level config keys, which is what bounds the Optuna search space.
+    ``kb_id`` 有值时只看该领域包的实验（同包跨会话沉淀：单领域深耕闭环）。
     """
     where = []
     params: list[Any] = []
@@ -200,6 +229,7 @@ def query_priors(
     if dataset:
         where.append("dataset = ?")
         params.append(dataset)
+    _kb_clause(kb_id, where, params)
     clause = f" WHERE {' AND '.join(where)}" if where else ""
     rows = _rows(
         "SELECT config_json, value, cost, duration_hours, metric FROM experiments"
@@ -257,7 +287,7 @@ def query_priors(
 
     return {
         "rows": len(rows),
-        "metrics": query_matrix(task=task, method=method, limit=100),
+        "metrics": query_matrix(task=task, method=method, limit=100, kb_id=kb_id),
         "hyperparams": hyperparams,
         "cost": _stat(costs),
         "duration": _stat(durations),

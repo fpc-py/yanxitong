@@ -50,6 +50,7 @@ logs/
 # --- 运行时数据（会话库 / 论文向量索引 / 上传文件 / 审计库）----
 data/sessions.db
 data/audit.db
+data/packs.db
 data/faiss/
 data/uploads/
 data/analysis/

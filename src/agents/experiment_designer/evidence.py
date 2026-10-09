@@ -64,10 +64,10 @@ def extract_keywords(intent: str, config: dict | None = None) -> list[str]:
     return tokens[:MAX_KEYWORDS]
 
 
-def _paper_anchors(papers: list[dict] | None) -> list[dict]:
+def _paper_anchors(papers: list[dict] | None, kb_id: str = "") -> list[dict]:
     anchors = []
     for i, paper in enumerate((papers or [])[:MAX_PAPERS]):
-        pid = make_paper_id(paper or {})
+        pid = make_paper_id(paper or {}, kb_id)
         if not pid:
             continue
         findings = paper.get("key_findings") or []
@@ -166,8 +166,14 @@ async def collect_evidence(
     config: dict | None = None,
     session_id: str = "",
     papers: list[dict] | None = None,
+    kb_id: str = "",
+    cross_kb_ids: list[str] | None = None,
 ) -> dict:
     """聚合 KG / 内置知识库 / 文献三类证据，任一来源失败只降级不中断。
+
+    ``kb_id`` 给定后图谱证据按领域包收窄：会话视图（精确锚点）+ 本包全局
+    （跨会话复用），显式声明的跨域包以 0.85 权重并入、路径只走主包 + 声明包；
+    文献锚点 id 与图谱写入端同用 kb 前缀。
 
     Returns:
         ``{kg: {entities, chains, paths, degraded, error}, kb: {…recall 结果},
@@ -175,7 +181,7 @@ async def collect_evidence(
     """
     settings = get_settings()
     keywords = extract_keywords(intent, config)
-    literature = _paper_anchors(papers)
+    literature = _paper_anchors(papers, kb_id)
 
     kg: dict = {"entities": [], "chains": [], "paths": [], "degraded": False, "error": ""}
     paper_ids = [a["ref"] for a in literature]
@@ -183,14 +189,27 @@ async def collect_evidence(
         try:
             store = await get_graph_store()
             if keywords:
+                ent_kwargs: dict = {"scope": session_id or None}
+                if kb_id:
+                    ent_kwargs["kb_id"] = kb_id
                 kg["entities"] = await store.search_entities_multi(
-                    keywords, limit=MAX_ENTITIES, scope=session_id or None
+                    keywords, limit=MAX_ENTITIES, **ent_kwargs
                 )
+                if kb_id:
+                    # 本包全局（跨会话复用）+ 显式跨域（0.85 加权），主包命中优先
+                    seen = {e.get("entity_id") for e in kg["entities"]}
+                    extra = await store.search_entities_multi(
+                        keywords, limit=MAX_ENTITIES,
+                        scope=None, kb_id=kb_id, cross_kb_ids=cross_kb_ids or None,
+                    )
+                    kg["entities"] += [e for e in extra if e.get("entity_id") not in seen]
+                    kg["entities"] = kg["entities"][:MAX_ENTITIES]
             if paper_ids:
                 kg["chains"] = await store.chain_query(paper_ids, limit=MAX_CHAINS)
             entry_ids = [e.get("entity_id") for e in kg["entities"][:10] if e.get("entity_id")]
             if entry_ids:
-                expanded = await store.multi_hop_paths(entry_ids, hops=2, limit=MAX_PATHS)
+                hop_kwargs = {"kb_ids": [kb_id, *(cross_kb_ids or [])]} if kb_id else {}
+                expanded = await store.multi_hop_paths(entry_ids, hops=2, limit=MAX_PATHS, **hop_kwargs)
                 kg["paths"] = expanded.get("paths") or []
         except Exception as exc:  # Neo4j 不可用：降级为仅 KB + 文献证据
             kg["degraded"] = True
@@ -200,11 +219,13 @@ async def collect_evidence(
 
     kb_result: dict = {"libraries": {}, "degraded": True, "sources": 0}
     try:
+        kb_kwargs = {"kb_id": kb_id} if kb_id else {}
         kb_result = knowledge_libs.recall(
             intent,
             None,
             top_k=settings.designer.recall_top_k,
             libraries=knowledge_libs.DESIGN_LIBRARIES,
+            **kb_kwargs,
         )
     except Exception as exc:
         logger.warning("design evidence: 知识库召回降级: %s", exc)

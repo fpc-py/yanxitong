@@ -9,6 +9,7 @@
 """
 
 import hashlib
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -57,11 +58,12 @@ def get_kb_store() -> VectorStore:
     return _kb_store
 
 
-def add_chunks(filename: str, chunks: list[dict], library: str, owner: str, content_hash: str = "") -> int:
+def add_chunks(filename: str, chunks: list[dict], library: str, owner: str, content_hash: str = "", kb_id: str = "") -> int:
     """把解析出的块写入对应库并落盘，返回新增块数；块级 sha256 去重。
 
     每个 chunk 来自 ``pdf_ingest.chunk_parsed_doc``：含 text/page/para/
     section_title/char_start/char_end/chunk_index。
+    ``kb_id``：可选领域包标签（空=通用，所有包均可召回）。
     """
     if not chunks:
         return 0
@@ -83,6 +85,7 @@ def add_chunks(filename: str, chunks: list[dict], library: str, owner: str, cont
             "kind": "knowledge",
             "library": library,
             "scope": scope,
+            "kb_id": (kb_id or "").strip(),
             "owner": owner,
             "content_hash": content_hash,
             "filename": filename,
@@ -102,6 +105,23 @@ def add_chunks(filename: str, chunks: list[dict], library: str, owner: str, cont
     return len(docs)
 
 
+def count_chunks_by_kb(kb_id: str) -> int:
+    """统计某领域包标签的块数；直接读 docs.json，不加载嵌入模型。"""
+    kb = (kb_id or "").strip()
+    if not kb:
+        return 0
+    path = os.path.join(KB_DIR, "docs.json")
+    if not os.path.exists(path):
+        return 0
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            docs = json.load(f).get("documents", {})
+    except Exception as exc:  # 统计降级为 0，不阻塞包列表
+        logger.warning("KB docs read degraded: %s", exc)
+        return 0
+    return sum(1 for d in docs.values() if (d or {}).get("kb_id") == kb)
+
+
 def find_by_hash(library: str, owner: str, content_hash: str) -> dict | None:
     """同一库中是否已存在该内容哈希的文档（重复上传秒答 deduped）。"""
     if not content_hash:
@@ -117,11 +137,20 @@ def find_by_hash(library: str, owner: str, content_hash: str) -> dict | None:
     return None
 
 
-def query_chunks(query: str, scopes: list[str], top_k: int = 5) -> list[dict]:
-    """按 scope 列表做向量检索（GraphRAG 合并 team + 个人双区）。"""
+def query_chunks(query: str, scopes: list[str], top_k: int = 5, kb_id: str = "") -> list[dict]:
+    """按 scope 列表做向量检索（GraphRAG 合并 team + 个人双区）。
+
+    ``kb_id`` 给定后按领域包过滤：仅保留未打标签（通用）或标签等于该包的块；
+    过滤会收窄候选，故先取更大候选窗再过滤截断。内置库（``kb:lib:*``）块
+    不打标签，任何领域包下均可见。
+    """
     if not scopes:
         return []
-    return get_kb_store().search(query, top_k=top_k, scopes=scopes)
+    store = get_kb_store()
+    if not kb_id:
+        return store.search(query, top_k=top_k, scopes=scopes)
+    hits = store.search(query, top_k=max(top_k * 4, 16), scopes=scopes)
+    return [h for h in hits if (h.get("kb_id") or "") in ("", kb_id)][:top_k]
 
 
 def list_files(owner: str) -> list[dict]:

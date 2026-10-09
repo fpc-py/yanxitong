@@ -54,7 +54,8 @@ class InputSanitizationMiddleware(BaseHTTPMiddleware):
                 body = await request.json()
                 if isinstance(body, dict):
                     for key, value in body.items():
-                        if isinstance(value, str):
+                        # 空串是合法可选字段（如 description=""），不构成注入风险，跳过
+                        if isinstance(value, str) and value.strip():
                             guard = get_input_guard()
                             result = guard.check(value)
                             if not result.passed:

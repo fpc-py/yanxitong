@@ -156,10 +156,11 @@ class TripleVerifier:
             })
         return out
 
-    async def verify_answer(self, answer: str, kg_query=None) -> dict:
+    async def verify_answer(self, answer: str, kg_query=None, kb_id: str = "") -> dict:
         """抽取 + 反查 + 判定，返回可序列化的报告 dict。
 
         ``kg_query`` 可注入替身（测试）；缺省用全局 GraphStore。
+        ``kb_id`` 把反查限定在领域包内（空 = 旧全局行为）。
         """
         triples = await self.extract_triples(answer)
         if not triples:
@@ -167,7 +168,8 @@ class TripleVerifier:
                     "states": {}, "degraded": False}
         try:
             gs = kg_query if kg_query is not None else await get_graph_store()
-            facts = await gs.verify_triples(triples)
+            verify_kwargs = {"kb_id": kb_id} if kb_id else {}
+            facts = await gs.verify_triples(triples, **verify_kwargs)
         except Exception as exc:
             logger.warning("三元组反查降级: %s", exc)
             return {"checked": len(triples), "score": 0.5, "triples": [], "flags": [],
